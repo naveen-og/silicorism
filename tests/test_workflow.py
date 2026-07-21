@@ -439,6 +439,98 @@ def test_cli_msg_routes_via_env(tmp_path):
         del os.environ["SILICORISM_DB"], os.environ["SILICORISM_SELF"]
 
 
+# --- dynamic DAG + verify -----------------------------------------------------
+
+def test_build_dag_wires_deps_and_attrs(tmp_path):
+    import silicorism_tools
+    dbp = str(tmp_path / "dag.db")
+    db.init_db(dbp)
+    conn = db.connect(dbp)
+    nodes = [
+        {"id": "scout", "prompt": "recon", "model": "opencode/deepseek-v4-flash-free",
+         "thinking": "high", "skills": ["tdd"]},
+        {"id": "build", "prompt": "impl", "depends_on": ["scout"],
+         "harness": "claude"},
+    ]
+    out = silicorism_tools.build_dag(conn, dbp, nodes)
+    assert set(out["nodes"]) == {"scout", "build"}
+    # build depends on scout's db id
+    dep = json.loads(conn.execute("SELECT depends_on FROM tasks WHERE id=?",
+                                  (out["nodes"]["build"],)).fetchone()["depends_on"])
+    assert dep == [out["nodes"]["scout"]]
+    # per-node attrs land in the payload
+    sp = json.loads(conn.execute("SELECT payload FROM tasks WHERE id=?",
+                                 (out["nodes"]["scout"],)).fetchone()["payload"])
+    assert sp["model"] == "opencode/deepseek-v4-flash-free"
+    assert sp["thinking"] == "high" and sp["skills"] == ["tdd"]
+    # harness becomes the task_type
+    bt = conn.execute("SELECT task_type FROM tasks WHERE id=?",
+                      (out["nodes"]["build"],)).fetchone()["task_type"]
+    assert bt == "claude"
+    conn.close()
+
+
+def test_build_dag_worktree_wrap(tmp_path):
+    import silicorism_tools
+    dbp = str(tmp_path / "w.db")
+    db.init_db(dbp)
+    conn = db.connect(dbp)
+    out = silicorism_tools.build_dag(
+        conn, dbp, [{"id": "only", "prompt": "go"}], name="feat")
+    # root node waits on the worktree; cleanup waits on the leaf
+    assert "worktree" in out and "cleanup" in out
+    root_dep = json.loads(conn.execute("SELECT depends_on FROM tasks WHERE id=?",
+                                       (out["nodes"]["only"],)).fetchone()["depends_on"])
+    assert root_dep == [out["worktree"]]
+    clean_dep = json.loads(conn.execute("SELECT depends_on FROM tasks WHERE id=?",
+                                        (out["cleanup"],)).fetchone()["depends_on"])
+    assert clean_dep == [out["nodes"]["only"]]
+    conn.close()
+
+
+def test_build_dag_rejects_cycle_and_bad_dep(tmp_path):
+    import silicorism_tools
+    dbp = str(tmp_path / "c.db")
+    db.init_db(dbp)
+    conn = db.connect(dbp)
+    for bad in (
+        [{"id": "a", "prompt": "x", "depends_on": ["b"]},
+         {"id": "b", "prompt": "y", "depends_on": ["a"]}],           # cycle
+        [{"id": "a", "prompt": "x", "depends_on": ["ghost"]}],       # unknown dep
+        [{"id": "a", "prompt": "x", "harness": "bogus"}],            # bad harness
+    ):
+        try:
+            silicorism_tools.build_dag(conn, dbp, bad)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"{bad} should have raised")
+    conn.close()
+
+
+def test_verify_status_transitions(tmp_path):
+    import silicorism_tools
+    dbp = str(tmp_path / "vs.db")
+    db.init_db(dbp)
+    conn = db.connect(dbp)
+    # pending work -> not satisfied
+    t = db.add_task(conn, "echo", "hi")
+    v = silicorism_tools.verify_status(conn)
+    assert v["satisfied"] is False and v["active"] == 1
+    # all complete -> satisfied
+    db.complete_task(conn, t, artifact="ok")
+    assert silicorism_tools.verify_status(conn)["satisfied"] is True
+    # a failed task surfaces with its last error
+    t2 = db.add_task(conn, "fail", "boom")
+    for _ in range(4):
+        db.fail_task(conn, t2)  # exhaust retries -> failed
+    db.log(conn, t2, "w0", "error: boom", level="error")
+    v3 = silicorism_tools.verify_status(conn)
+    assert v3["satisfied"] is False
+    assert v3["failures"][0]["id"] == t2 and "boom" in v3["failures"][0]["error"]
+    conn.close()
+
+
 # --- cli default_db resolution ----------------------------------------------
 
 def test_default_db_git_vs_nongit(tmp_path):

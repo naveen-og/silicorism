@@ -14,6 +14,14 @@ import handlers
 
 WORKTREE_ROOT = handlers.WORKTREE_ROOT
 
+# Default per-role models: opencode free tier (unlimited), all reasoning-capable.
+DEFAULT_MODELS = {
+    "scout": "opencode/deepseek-v4-flash-free",
+    "builder": "opencode/nemotron-3-ultra-free",
+    "fixer": "opencode/hy3-free",
+}
+DEFAULT_THINKING = "high"
+
 
 def build_pipeline(conn, db_path, name, prompt, *, base="main",
                    test_command="pytest -q", max_attempts=3) -> dict:
@@ -26,17 +34,18 @@ def build_pipeline(conn, db_path, name, prompt, *, base="main",
                      json.dumps({"branch": name, "base": base, "db": db_path}),
                      worktree_path=path)
     t2 = db.add_task(conn, "pi", json.dumps({
-        "model": "deepseek-v4-flash", "cwd": path, "p2p": True,
-        "agent_id": f"scout-{name}",
+        "model": DEFAULT_MODELS["scout"], "thinking": DEFAULT_THINKING,
+        "cwd": path, "p2p": True, "agent_id": f"scout-{name}",
         "prompt": f"Scout the repo for: {prompt}. Write CONTEXT.md.",
     }), depends_on=t1, worktree_path=path)
     t3 = db.add_task(conn, "pi", json.dumps({
-        "model": "nemotron", "cwd": path, "p2p": True,
-        "agent_id": f"builder-{name}",
+        "model": DEFAULT_MODELS["builder"], "thinking": DEFAULT_THINKING,
+        "cwd": path, "p2p": True, "agent_id": f"builder-{name}",
         "prompt": f"Builder: implement using the context. {prompt}",
     }), depends_on=t2, worktree_path=path)
     t4 = db.add_task(conn, "fixer_loop", json.dumps({
-        "test_command": test_command, "agent_type": "pi", "model": "hy3",
+        "test_command": test_command, "agent_type": "pi",
+        "model": DEFAULT_MODELS["fixer"], "thinking": DEFAULT_THINKING,
         "cwd": path, "max_attempts": max_attempts, "db": db_path,
         "upstream": f"builder-{name}", "agent_id": f"fixer-{name}",
     }), depends_on=t3, worktree_path=path)
@@ -47,6 +56,117 @@ def build_pipeline(conn, db_path, name, prompt, *, base="main",
     return {"name": name, "worktree_path": path,
             "tasks": {"worktree": t1, "scout": t2, "builder": t3,
                       "fixer": t4, "cleanup": t5}}
+
+
+def _toposort(nodes: list[dict]) -> list[str]:
+    """Dependency-first order of node ids; raises ValueError on a cycle."""
+    graph = {n["id"]: list(n.get("depends_on") or []) for n in nodes}
+    state: dict[str, int] = {}  # 0 = visiting, 1 = done
+    order: list[str] = []
+
+    def visit(v: str) -> None:
+        if state.get(v) == 1:
+            return
+        if state.get(v) == 0:
+            raise ValueError(f"cycle detected at node {v!r}")
+        state[v] = 0
+        for dep in graph[v]:
+            visit(dep)
+        state[v] = 1
+        order.append(v)
+
+    for v in graph:
+        visit(v)
+    return order
+
+
+def build_dag(conn, db_path, nodes, *, name=None, base="main", cwd=None) -> dict:
+    """Submit an arbitrary agent DAG. Each node is a dict:
+
+        {id, prompt, depends_on?, harness?("pi"|"claude"), model?, thinking?,
+         skills?, p2p?}
+
+    If `name` is given the DAG is wrapped in a git worktree (worktree_create ->
+    nodes -> worktree_cleanup) and every node runs in it; otherwise nodes run in
+    `cwd` (default '.'). Returns {"nodes": {node_id: task_id}, ...}.
+    """
+    if not nodes:
+        raise ValueError("nodes must be a non-empty list")
+    ids = [n["id"] for n in nodes]
+    if len(set(ids)) != len(ids):
+        raise ValueError("duplicate node id in DAG")
+    idset = set(ids)
+    for n in nodes:
+        for dep in n.get("depends_on") or []:
+            if dep not in idset:
+                raise ValueError(f"node {n['id']!r} depends on unknown node {dep!r}")
+    order = _toposort(nodes)  # also raises on cycles
+    node_by_id = {n["id"]: n for n in nodes}
+
+    work_path = cwd or "."
+    wt_task = None
+    if name:
+        work_path = os.path.join(WORKTREE_ROOT, name)
+        wt_task = db.add_task(conn, "worktree_create",
+                              json.dumps({"branch": name, "base": base, "db": db_path}),
+                              worktree_path=work_path)
+
+    id_map: dict[str, int] = {}
+    for nid in order:
+        n = node_by_id[nid]
+        harness = n.get("harness") or "pi"
+        if harness not in ("pi", "claude"):
+            raise ValueError(f"node {nid!r}: harness must be 'pi' or 'claude'")
+        deps = [id_map[d] for d in (n.get("depends_on") or [])]
+        if wt_task and not deps:
+            deps = [wt_task]  # root nodes wait for the worktree to exist
+        payload = {"prompt": n["prompt"], "cwd": work_path,
+                   "p2p": n.get("p2p", True), "agent_id": nid, "db": db_path}
+        for key in ("model", "thinking", "skills"):
+            if n.get(key):
+                payload[key] = n[key]
+        id_map[nid] = db.add_task(conn, harness, json.dumps(payload),
+                                  depends_on=deps or None, worktree_path=work_path)
+
+    result = {"nodes": id_map}
+    if name:
+        depended = {d for n in nodes for d in (n.get("depends_on") or [])}
+        leaves = [id_map[nid] for nid in ids if nid not in depended]
+        result["cleanup"] = db.add_task(
+            conn, "worktree_cleanup",
+            json.dumps({"worktree_path": work_path, "branch": name, "db": db_path}),
+            depends_on=leaves, worktree_path=work_path)
+        result["worktree"] = wt_task
+        result["worktree_path"] = work_path
+    return result
+
+
+def verify_status(conn) -> dict:
+    """Verdict for the orchestrator loop: is the goal met, and if not, why.
+
+    satisfied = nothing pending/processing, no failed tasks, at least one done.
+    failures carry each failed task's artifact + last error log so the caller
+    can generate a corrective DAG.
+    """
+    counts = db.counts(conn)
+    active = counts["pending"] + counts["processing"]
+    failures = []
+    for r in conn.execute(
+            "SELECT id, task_type, output_artifact FROM tasks "
+            "WHERE status='failed' ORDER BY id").fetchall():
+        err = conn.execute(
+            "SELECT message FROM execution_logs WHERE task_id=? AND level='error' "
+            "ORDER BY id DESC LIMIT 1", (r["id"],)).fetchone()
+        failures.append({"id": r["id"], "task_type": r["task_type"],
+                         "artifact": r["output_artifact"],
+                         "error": err["message"] if err else None})
+    return {
+        "satisfied": active == 0 and counts["failed"] == 0 and counts["completed"] > 0,
+        "tasks": counts,
+        "active": active,
+        "failures": failures,
+        "quarantined": [w["path"] for w in db.worktrees(conn, "quarantined")],
+    }
 
 
 def gc_worktrees(conn, db_path, *, failed=False) -> dict:
@@ -78,9 +198,16 @@ def gc_worktrees(conn, db_path, *, failed=False) -> dict:
 
 
 def get_status(conn) -> dict:
-    """Live DAG + P2P snapshot for the orchestrator context."""
+    """Live DAG + P2P snapshot for the orchestrator context.
+
+    Includes the verify verdict (satisfied? + failed-task artifacts/errors) so a
+    single status call tells the orchestrator whether to re-loop.
+    """
+    verdict = verify_status(conn)
     return {
-        "tasks": db.counts(conn),
+        "tasks": verdict["tasks"],
+        "satisfied": verdict["satisfied"],
+        "failures": verdict["failures"],
         "agents": [dict(h) for h in db.heartbeats(conn)],
         "messages": [dict(m) for m in db.recent_messages(conn, 20)],
         "worktrees": [dict(w) for w in db.worktrees(conn)],
@@ -124,11 +251,32 @@ if __name__ == "__main__":
         p = build_pipeline(conn, dbp, "demo", "add auth")
         assert list(p["tasks"]) == ["worktree", "scout", "builder", "fixer", "cleanup"]
         assert p["tasks"]["cleanup"] == 5
+        # default models are the opencode free tier with high thinking
+        sp = json.loads(conn.execute("SELECT payload FROM tasks WHERE id=?",
+                                     (p["tasks"]["builder"],)).fetchone()["payload"])
+        assert sp["model"] == "opencode/nemotron-3-ultra-free" and sp["thinking"] == "high"
         st = get_status(conn)
-        assert st["tasks"]["pending"] == 5
+        assert st["tasks"]["pending"] == 5 and st["satisfied"] is False
         assert st["messages"] == [] and st["worktrees"] == []
         db.send_inter_agent_message(conn, "a", "b", "hi")
         assert get_status(conn)["messages"][0]["content"] == "hi"
         assert gc_worktrees(conn, dbp) == {"cleaned": [], "kept": []}
+        conn.close()
+
+        # dynamic DAG: deps wire, cycle rejected
+        dbp2 = f"{d}/dag.db"
+        db.init_db(dbp2)
+        conn = db.connect(dbp2)
+        dag = build_dag(conn, dbp2, [
+            {"id": "a", "prompt": "x"},
+            {"id": "b", "prompt": "y", "depends_on": ["a"], "harness": "claude"}])
+        assert set(dag["nodes"]) == {"a", "b"}
+        assert verify_status(conn)["satisfied"] is False
+        try:
+            build_dag(conn, dbp2, [{"id": "a", "prompt": "x", "depends_on": ["a"]}])
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("self-cycle must raise")
         conn.close()
     print("silicorism_tools OK")

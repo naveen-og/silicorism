@@ -35,25 +35,75 @@ def _slug(text: str) -> str:
             or "feature")[:32]
 
 
+def _spawn_workers(dbp: str, n: int) -> str:
+    """Launch N detached native-pane workers that drain the queue."""
+    env = dict(os.environ, SILICORISM_NATIVE="1")
+    subprocess.Popen(
+        [sys.executable, CLI, "run", "--db", dbp, "--workers", str(n), "--drain"],
+        env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        start_new_session=True)
+    return f"started {n} workers on {dbp}"
+
+
 # --- tool handlers ----------------------------------------------------------
 
 def _plan_and_submit(args: dict) -> str:
-    """Build + submit the 5-task DAG (worktree->scout->builder->fixer->cleanup)."""
-    prompt = args.get("prompt")
-    if not prompt:
-        raise ValueError("prompt is required")
+    """Submit a plan and auto-start workers in one action.
+
+    Pass `nodes` for a custom DAG (each node: id, prompt, depends_on, harness,
+    model, thinking, skills) — this is the orchestrator's real planning surface.
+    Or pass `prompt` for the default 5-task pipeline fallback. Workers spawn
+    automatically (SILICORISM_NATIVE=1) unless workers=0.
+    """
     dbp = _db(args)
     db.init_db(dbp)
     conn = db.connect(dbp)
     try:
-        p = silicorism_tools.build_pipeline(
-            conn, dbp, args.get("name") or _slug(prompt), prompt,
-            base=args.get("base") or "main",
-            test_command=args.get("test_command") or "pytest -q",
-            max_attempts=int(args.get("max_attempts") or 3))
+        nodes = args.get("nodes")
+        if nodes:
+            out = silicorism_tools.build_dag(
+                conn, dbp, nodes, name=args.get("name"),
+                base=args.get("base") or "main", cwd=args.get("cwd"))
+            out["mode"] = "dag"
+        elif args.get("prompt"):
+            out = silicorism_tools.build_pipeline(
+                conn, dbp, args.get("name") or _slug(args["prompt"]), args["prompt"],
+                base=args.get("base") or "main",
+                test_command=args.get("test_command") or "pytest -q",
+                max_attempts=int(args.get("max_attempts") or 3))
+            out["mode"] = "pipeline"
+        else:
+            raise ValueError("provide either 'nodes' (custom DAG) or 'prompt'")
     finally:
         conn.close()
-    return json.dumps(p)
+    workers = int(args.get("workers", 3))
+    if workers > 0:
+        out["workers"] = _spawn_workers(dbp, workers)
+    return json.dumps(out)
+
+
+def _verify_and_continue(args: dict) -> str:
+    """Verdict (satisfied? + failed-task artifacts/errors) for the re-loop.
+
+    If not satisfied and a corrective `nodes` DAG is supplied, submit it and
+    (re)start workers so the orchestrator can iterate until the goal is met.
+    """
+    dbp = _db(args)
+    db.init_db(dbp)
+    conn = db.connect(dbp)
+    try:
+        verdict = silicorism_tools.verify_status(conn)
+        nodes = args.get("nodes")
+        if nodes and not verdict["satisfied"]:
+            verdict["resubmitted"] = silicorism_tools.build_dag(
+                conn, dbp, nodes, name=args.get("name"),
+                base=args.get("base") or "main", cwd=args.get("cwd"))
+            workers = int(args.get("workers", 3))
+            if workers > 0:
+                verdict["workers"] = _spawn_workers(dbp, workers)
+    finally:
+        conn.close()
+    return json.dumps(verdict)
 
 
 def _get_status(args: dict) -> str:
@@ -70,15 +120,9 @@ def _get_status(args: dict) -> str:
 
 def _start_workers(args: dict) -> str:
     """Launch N detached native-pane workers that drain the queue."""
-    n = int(args.get("count") or 3)
     dbp = _db(args)
     db.init_db(dbp)
-    env = dict(os.environ, SILICORISM_NATIVE="1")
-    subprocess.Popen(
-        [sys.executable, CLI, "run", "--db", dbp, "--workers", str(n), "--drain"],
-        env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        start_new_session=True)
-    return f"started {n} workers on {dbp}"
+    return _spawn_workers(dbp, int(args.get("count") or 3))
 
 
 def _gc(args: dict) -> str:
@@ -96,21 +140,69 @@ def _gc(args: dict) -> str:
 TOOLS = [
     {
         "name": "silicorism_plan_and_submit",
-        "description": "Build and submit the 5-task feature DAG (worktree, scout, "
-                       "builder, fixer, cleanup) to the orchestrator queue.",
+        "description": "Submit a plan AND auto-start native-pane workers in one "
+                       "action. Pass 'nodes' for a custom DAG you design (per-node "
+                       "harness/model/thinking/skills), or 'prompt' for the default "
+                       "5-task pipeline. Watch live with: tmux attach -t "
+                       "silicorism-session.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "prompt": {"type": "string", "description": "What to build"},
-                "name": {"type": "string", "description": "Feature/branch name"},
+                "nodes": {
+                    "type": "array",
+                    "description": "Custom DAG. Each node designs one agent task.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": {"type": "string", "description": "Unique node id"},
+                            "prompt": {"type": "string"},
+                            "depends_on": {"type": "array", "items": {"type": "string"},
+                                           "description": "ids of prerequisite nodes"},
+                            "harness": {"type": "string", "enum": ["pi", "claude"]},
+                            "model": {"type": "string",
+                                      "description": "e.g. opencode/nemotron-3-ultra-free"},
+                            "thinking": {"type": "string",
+                                         "description": "off|minimal|low|medium|high|xhigh|max"},
+                            "skills": {"type": "array", "items": {"type": "string"}},
+                        },
+                        "required": ["id", "prompt"],
+                    },
+                },
+                "prompt": {"type": "string",
+                           "description": "Fallback: default 5-task pipeline goal"},
+                "name": {"type": "string", "description": "Feature/branch name; when "
+                         "set the DAG runs in a git worktree"},
                 "base": {"type": "string", "description": "Base branch"},
                 "test_command": {"type": "string"},
                 "max_attempts": {"type": "integer"},
+                "workers": {"type": "integer",
+                            "description": "Workers to auto-start (default 3, 0 = none)"},
+                "cwd": {"type": "string"},
                 "db": {"type": "string", "description": "Override DB path"},
             },
-            "required": ["prompt"],
         },
         "handler": _plan_and_submit,
+    },
+    {
+        "name": "silicorism_verify_and_continue",
+        "description": "Verification verdict for the re-loop: is the goal satisfied, "
+                       "and if not, each failed task's artifact + last error. Supply "
+                       "a corrective 'nodes' DAG to resubmit and restart workers, "
+                       "iterating until satisfied or you stop.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "nodes": {"type": "array", "items": {"type": "object"},
+                          "description": "Corrective DAG (same node schema as "
+                                         "plan_and_submit); submitted only if not satisfied"},
+                "name": {"type": "string"},
+                "base": {"type": "string"},
+                "workers": {"type": "integer"},
+                "cwd": {"type": "string"},
+                "db": {"type": "string"},
+            },
+        },
+        "handler": _verify_and_continue,
     },
     {
         "name": "silicorism_get_status",

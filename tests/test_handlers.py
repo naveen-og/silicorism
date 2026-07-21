@@ -33,7 +33,7 @@ def test_pi_full_payload(run):
 def test_pi_defaults(run):
     run.return_value = _proc()
     handlers.run("pi", json.dumps({"prompt": "go"}))
-    assert run.call_args.args[0] == ["pi", "--model", "deepseek-v4-flash", "go"]
+    assert run.call_args.args[0] == ["pi", "--model", "opencode/deepseek-v4-flash-free","go"]
     assert run.call_args.kwargs["cwd"] is None
 
 
@@ -41,7 +41,7 @@ def test_pi_defaults(run):
 def test_pi_fallback_string(run):
     run.return_value = _proc()
     handlers.run("pi", "just a prompt")
-    assert run.call_args.args[0] == ["pi", "--model", "deepseek-v4-flash", "just a prompt"]
+    assert run.call_args.args[0] == ["pi", "--model", "opencode/deepseek-v4-flash-free","just a prompt"]
 
 
 @patch("handlers.subprocess.run")

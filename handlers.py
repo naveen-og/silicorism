@@ -124,7 +124,7 @@ def native_command(task_type: str, payload: str, context=None,
                    f"export SILICORISM_SELF={shlex.quote(agent_id)}; "
                    f"silicorism-msg(){{ python {shlex.quote(cli_path)} msg \"$@\"; }}; ")
     if task_type == "pi":
-        parts = ["pi", "-p", "--model", data.get("model") or "deepseek-v4-flash"]
+        parts = ["pi", "-p", "--model", data.get("model") or "opencode/deepseek-v4-flash-free"]
         if data.get("thinking"):
             parts += ["--thinking", data["thinking"]]
         parts.append(prompt)
@@ -139,7 +139,7 @@ def native_command(task_type: str, payload: str, context=None,
 def run_pi_agent(payload: str, context=None) -> str:
     """pi --model <model> [--thinking <thinking>] "<prompt>" (cwd optional)."""
     data = _parse(payload)
-    cmd = ["pi", "--model", data.get("model") or "deepseek-v4-flash"]
+    cmd = ["pi", "--model", data.get("model") or "opencode/deepseek-v4-flash-free"]
     if data.get("thinking"):
         cmd += ["--thinking", data["thinking"]]
     cmd.append(_prompt(data, context))
@@ -206,7 +206,14 @@ def worktree_cleanup(payload: str, context=None) -> str:
     return f"removed {path}"
 
 
-def _ask_upstream(db_path, fixer_id, upstream, agent, model, cwd, error) -> str:
+def _agent_payload(prompt, model, thinking, cwd) -> str:
+    d = {"prompt": prompt, "model": model, "cwd": cwd}
+    if thinking:
+        d["thinking"] = thinking
+    return json.dumps(d)
+
+
+def _ask_upstream(db_path, fixer_id, upstream, agent, model, thinking, cwd, error) -> str:
     """P2P clarification: fixer asks the upstream task, records both notes.
 
     Sends the question on the channel, invokes the upstream agent to answer,
@@ -219,8 +226,7 @@ def _ask_upstream(db_path, fixer_id, upstream, agent, model, cwd, error) -> str:
         conn = db.connect(db_path)
         try:
             db.send_inter_agent_message(conn, fixer_id, upstream, question)
-            reply = HANDLERS[agent](json.dumps(
-                {"prompt": question, "model": model, "cwd": cwd}))
+            reply = HANDLERS[agent](_agent_payload(question, model, thinking, cwd))
             db.send_inter_agent_message(conn, upstream, fixer_id, reply)
             return reply
         finally:
@@ -246,6 +252,8 @@ def fixer_loop(payload: str, context=None) -> str:
     db_path = data.get("db")
     upstream = data.get("upstream")
     fixer_id = data.get("agent_id") or "fixer"
+    model = data.get("model")
+    thinking = data.get("thinking")
 
     last = ""
     clarification = ""
@@ -262,13 +270,12 @@ def fixer_loop(payload: str, context=None) -> str:
         if i >= 2 and not asked and db_path and upstream:
             asked = True
             clarification = _ask_upstream(
-                db_path, fixer_id, upstream, agent, data.get("model"), cwd, last)
+                db_path, fixer_id, upstream, agent, model, thinking, cwd, last)
         prompt = f"The tests failed with errors:\n{last}\nFix the files in the directory."
         if clarification:
             prompt += f"\n\nUpstream clarification:\n{clarification}"
         try:
-            HANDLERS[agent](json.dumps(
-                {"prompt": prompt, "model": data.get("model"), "cwd": cwd}))
+            HANDLERS[agent](_agent_payload(prompt, model, thinking, cwd))
         except Exception:  # noqa: BLE001 - the next test run is the real verdict
             pass
 

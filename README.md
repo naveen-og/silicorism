@@ -47,10 +47,22 @@ into the agent prompt.
 
 ## MCP server (Claude Code)
 ```bash
-claude mcp add silicorism -- python /path/to/silicorism_mcp.py
+claude mcp add silicorism --scope user -- python /path/to/silicorism_mcp.py
 ```
-Exposes `silicorism_plan_and_submit`, `silicorism_get_status`,
-`silicorism_start_workers`, `silicorism_gc`.
+Tools: `silicorism_plan_and_submit`, `silicorism_get_status`,
+`silicorism_start_workers`, `silicorism_gc`, `silicorism_verify_and_continue`.
+
+**Orchestrator loop.** `silicorism_plan_and_submit` submits a plan **and
+auto-starts native-pane workers** in one call. Pass `prompt` for the default
+5-task pipeline, or `nodes` for a custom DAG you design — each node sets its own
+`id`, `prompt`, `depends_on`, `harness` (`pi`/`claude`), `model`, `thinking`
+(`high`…), and `skills`. `silicorism_get_status` returns a `satisfied` verdict
+plus each failed task's artifact + last error; `silicorism_verify_and_continue`
+lets the orchestrator resubmit a corrective DAG and re-run until satisfied.
+
+Default per-role models are the **opencode free tier** (unlimited, `thinking:high`):
+scout `opencode/deepseek-v4-flash-free`, builder `opencode/nemotron-3-ultra-free`,
+fixer `opencode/hy3-free` — all overridable per node.
 
 ## Concurrency model
 - Every state write goes through `db.immediate()` = `BEGIN IMMEDIATE` + exponential

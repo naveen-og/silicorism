@@ -25,11 +25,12 @@ def test_initialized_notification_is_silent():
     assert mcp.handle({"jsonrpc": "2.0", "method": "notifications/initialized"}) is None
 
 
-def test_tools_list_exposes_four_canonical_tools():
+def test_tools_list_exposes_canonical_tools():
     r = mcp.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
     names = {t["name"] for t in r["result"]["tools"]}
     assert names == {"silicorism_plan_and_submit", "silicorism_get_status",
-                     "silicorism_start_workers", "silicorism_gc"}
+                     "silicorism_start_workers", "silicorism_gc",
+                     "silicorism_verify_and_continue"}
     # every tool advertises an inputSchema (no handler leakage)
     for t in r["result"]["tools"]:
         assert set(t) == {"name", "description", "inputSchema"}
@@ -37,19 +38,51 @@ def test_tools_list_exposes_four_canonical_tools():
 
 def test_tools_call_plan_and_get_status(tmp_path):
     dbp = str(tmp_path / "mcp.db")
-    # plan_and_submit builds the 5-task DAG
+    # plan_and_submit (pipeline fallback); workers=0 so no real processes spawn
     r = mcp.handle({"jsonrpc": "2.0", "id": 3, "method": "tools/call",
                     "params": {"name": "silicorism_plan_and_submit",
-                               "arguments": {"prompt": "add auth", "db": dbp}}})
+                               "arguments": {"prompt": "add auth", "db": dbp,
+                                             "workers": 0}}})
     assert r["result"]["isError"] is False
     payload = json.loads(r["result"]["content"][0]["text"])
+    assert payload["mode"] == "pipeline"
     assert list(payload["tasks"]) == ["worktree", "scout", "builder", "fixer", "cleanup"]
-    # get_status reflects the 5 queued tasks
+    # get_status reflects the 5 queued tasks + a not-yet-satisfied verdict
     r2 = mcp.handle({"jsonrpc": "2.0", "id": 4, "method": "tools/call",
                      "params": {"name": "silicorism_get_status",
                                 "arguments": {"db": dbp}}})
     status = json.loads(r2["result"]["content"][0]["text"])
     assert status["tasks"]["pending"] == 5
+    assert status["satisfied"] is False
+
+
+def test_tools_call_dynamic_dag(tmp_path):
+    dbp = str(tmp_path / "dag.db")
+    nodes = [
+        {"id": "a", "prompt": "recon", "harness": "pi",
+         "model": "opencode/deepseek-v4-flash-free", "thinking": "high"},
+        {"id": "b", "prompt": "build", "depends_on": ["a"], "harness": "pi",
+         "model": "opencode/nemotron-3-ultra-free", "thinking": "high"},
+        {"id": "c", "prompt": "review", "depends_on": ["b"], "harness": "claude"},
+    ]
+    r = mcp.handle({"jsonrpc": "2.0", "id": 5, "method": "tools/call",
+                    "params": {"name": "silicorism_plan_and_submit",
+                               "arguments": {"nodes": nodes, "db": dbp, "workers": 0}}})
+    assert r["result"]["isError"] is False
+    out = json.loads(r["result"]["content"][0]["text"])
+    assert out["mode"] == "dag"
+    assert set(out["nodes"]) == {"a", "b", "c"}
+
+
+def test_verify_and_continue_verdict(tmp_path):
+    dbp = str(tmp_path / "v.db")
+    r = mcp.handle({"jsonrpc": "2.0", "id": 6, "method": "tools/call",
+                    "params": {"name": "silicorism_verify_and_continue",
+                               "arguments": {"db": dbp}}})
+    verdict = json.loads(r["result"]["content"][0]["text"])
+    # empty queue: nothing completed yet -> not satisfied, no failures
+    assert verdict["satisfied"] is False
+    assert verdict["failures"] == []
 
 
 def test_tools_call_missing_prompt_is_error(tmp_path):
@@ -81,4 +114,4 @@ def test_end_to_end_stdio_handshake(tmp_path):
     # initialize + tools/list responses; the notification produced none
     assert len(lines) == 2
     assert lines[0]["result"]["serverInfo"]["name"] == "silicorism"
-    assert len(lines[1]["result"]["tools"]) == 4
+    assert len(lines[1]["result"]["tools"]) == 5
