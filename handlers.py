@@ -16,7 +16,7 @@ import db
 
 WORKTREE_ROOT = "/tmp/worktrees"
 
-# Task types that run as native CLI agents in a live tmux pane (HERDR_NATIVE).
+# Task types that run as native CLI agents in a live tmux pane (SILICORISM_NATIVE).
 NATIVE_AGENTS = ("pi", "claude")
 
 P2P_NOTE = (
@@ -95,8 +95,8 @@ def _prompt(data: dict, context, *, native=False) -> str:
         p += P2P_NOTE
         if native:
             p += ("\n\nYou can coordinate over the shell (bash tool):\n"
-                  "  herdr-msg send <agent_id> \"<text>\"   # message a peer\n"
-                  "  herdr-msg poll                         # read your inbox")
+                  "  silicorism-msg send <agent_id> \"<text>\"   # message a peer\n"
+                  "  silicorism-msg poll                         # read your inbox")
     return p
 
 
@@ -105,7 +105,7 @@ def native_command(task_type: str, payload: str, context=None,
     """Full shell command to run an agent live in a pane, or None if in-process.
 
     Only pi/claude tasks run natively; the prompt carries dep artifacts + a
-    `herdr-msg` alias (backed by `python cli.py msg`) so the agent can use the
+    `silicorism-msg` alias (backed by `python cli.py msg`) so the agent can use the
     P2P channel from its own bash tool. cwd is set by tmux, not here.
     """
     if task_type not in NATIVE_AGENTS:
@@ -115,10 +115,10 @@ def native_command(task_type: str, payload: str, context=None,
     prelude = ""
     agent_id, dbp = data.get("agent_id"), data.get("db")
     if agent_id and dbp:
-        # herdr-msg reads HERDR_DB/HERDR_SELF, so the agent calls it argument-free.
-        prelude = (f"export HERDR_DB={shlex.quote(dbp)}; "
-                   f"export HERDR_SELF={shlex.quote(agent_id)}; "
-                   f"herdr-msg(){{ python {shlex.quote(cli_path)} msg \"$@\"; }}; ")
+        # silicorism-msg reads SILICORISM_DB/SILICORISM_SELF, so the agent calls it argument-free.
+        prelude = (f"export SILICORISM_DB={shlex.quote(dbp)}; "
+                   f"export SILICORISM_SELF={shlex.quote(agent_id)}; "
+                   f"silicorism-msg(){{ python {shlex.quote(cli_path)} msg \"$@\"; }}; ")
     if task_type == "pi":
         parts = ["pi", "-p", "--model", data.get("model") or "deepseek-v4-flash"]
         if data.get("thinking"):

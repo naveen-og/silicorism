@@ -1,6 +1,6 @@
-# orchestrator
+# Silicorism
 
-High-throughput multi-agent task orchestrator. SQLite in WAL mode + a pool of
+Silicon + Tribalism: high-throughput multi-agent task orchestrator. SQLite in WAL mode + a pool of
 concurrent worker processes. Pure Python stdlib — no dependencies.
 
 ## Layout
@@ -15,11 +15,11 @@ concurrent worker processes. Pure Python stdlib — no dependencies.
 
 ## Use
 ```bash
-python cli.py init   --db orch.db
-python cli.py add    --db orch.db --type shell --payload "echo hi" --priority 5
-python cli.py run    --db orch.db --workers 4 --drain      # drops --drain to run forever
-python cli.py status --db orch.db --watch
-python cli.py reset  --db orch.db                          # requeue tasks stuck 'processing'
+python cli.py init   --db silicorism.db
+python cli.py add    --db silicorism.db --type shell --payload "echo hi" --priority 5
+python cli.py run    --db silicorism.db --workers 4 --drain      # drops --drain to run forever
+python cli.py status --db silicorism.db --watch
+python cli.py reset  --db silicorism.db                          # requeue tasks stuck 'processing'
 ```
 
 ## Concurrency model

@@ -16,7 +16,7 @@ small, independently-executable tasks and insert them into the queue.
 
 ## Enqueue a task
 ```bash
-python cli.py add --db orch.db --type shell \
+python cli.py add --db silicorism.db --type shell \
   --payload "<command>" --priority <n> --max-retries 3
 ```
 

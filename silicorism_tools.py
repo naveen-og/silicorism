@@ -1,6 +1,6 @@
 """Harness-agnostic bridge: the operations the Pi extension / Claude tools and
 the CLI both call. Pure functions over a db path so they are trivially testable
-and identical whether driven from `cli.py`, `pi -e extensions/herdr.ts`, or a
+and identical whether driven from `cli.py`, `pi -e extensions/silicorism.ts`, or a
 bare shell.
 """
 
@@ -107,7 +107,7 @@ def _spawn_worker_process(db_path, agent_id, *, native, drain) -> int:
 
     from worker import run_worker
     if native:
-        os.environ["HERDR_NATIVE"] = "1"  # child inherits; enables pane exec
+        os.environ["SILICORISM_NATIVE"] = "1"  # child inherits; enables pane exec
     p = mp.Process(target=run_worker, args=(db_path, agent_id),
                    kwargs={"max_idle_loops": 3 if drain else 0}, name=agent_id)
     p.start()
@@ -131,4 +131,4 @@ if __name__ == "__main__":
         assert get_status(conn)["messages"][0]["content"] == "hi"
         assert gc_worktrees(conn, dbp) == {"cleaned": [], "kept": []}
         conn.close()
-    print("herdr_tools OK")
+    print("silicorism_tools OK")

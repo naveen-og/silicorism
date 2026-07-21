@@ -293,9 +293,9 @@ def test_native_command_pi_with_p2p():
     cmd = handlers.native_command("pi", json.dumps({
         "prompt": "build it", "model": "hy3", "agent_id": "fixer-x",
         "db": "/tmp/x.db", "p2p": True}))
-    assert cmd.startswith("export HERDR_DB=")
-    assert "HERDR_SELF=fixer-x" in cmd
-    assert "herdr-msg()" in cmd
+    assert cmd.startswith("export SILICORISM_DB=")
+    assert "SILICORISM_SELF=fixer-x" in cmd
+    assert "silicorism-msg()" in cmd
     assert "pi -p --model hy3" in cmd
     assert "build it" in cmd
 
@@ -304,7 +304,7 @@ def test_native_command_claude_and_nonnative():
     c = handlers.native_command("claude", json.dumps({"prompt": "go"}))
     assert "claude -p" in c and "go" in c
     # no agent_id/db -> no P2P prelude
-    assert "herdr-msg()" not in c
+    assert "silicorism-msg()" not in c
     # non-agent task types stay in-process
     assert handlers.native_command("shell", "echo hi") is None
     assert handlers.native_command("worktree_create", "{}") is None
@@ -360,14 +360,14 @@ def test_worker_native_completes_and_fails(mock_tmux, tmp_path):
     conn.close()
 
 
-# --- herdr_tools bridge -----------------------------------------------------
+# --- silicorism_tools bridge -----------------------------------------------------
 
 def test_build_pipeline_wires_deps_and_p2p(tmp_path):
-    import herdr_tools
+    import silicorism_tools
     dbp = str(tmp_path / "bp.db")
     db.init_db(dbp)
     conn = db.connect(dbp)
-    p = herdr_tools.build_pipeline(conn, dbp, "feat", "do x")
+    p = silicorism_tools.build_pipeline(conn, dbp, "feat", "do x")
     t = p["tasks"]
     dep = json.loads(conn.execute(
         "SELECT depends_on FROM tasks WHERE id=?", (t["fixer"],)).fetchone()["depends_on"])
@@ -379,14 +379,14 @@ def test_build_pipeline_wires_deps_and_p2p(tmp_path):
 
 
 def test_start_workers_spawn_injectable(tmp_path):
-    import herdr_tools
+    import silicorism_tools
     calls = []
 
     def fake_spawn(db_path, agent, *, native, drain):
         calls.append((agent, native, drain))
         return 4242
 
-    pids = herdr_tools.start_workers(str(tmp_path / "s.db"), 3, _spawn=fake_spawn)
+    pids = silicorism_tools.start_workers(str(tmp_path / "s.db"), 3, _spawn=fake_spawn)
     assert pids == [4242, 4242, 4242]
     assert calls[0] == ("worker-0", True, True)
 
@@ -402,7 +402,7 @@ def test_cli_msg_routes_via_env(tmp_path):
     class Send:
         action, target, text, db, self_id = "send", "builder", "need spec", None, None
 
-    os.environ["HERDR_DB"], os.environ["HERDR_SELF"] = dbp, "fixer"
+    os.environ["SILICORISM_DB"], os.environ["SILICORISM_SELF"] = dbp, "fixer"
     try:
         cmd_msg(Send())
         conn = db.connect(dbp)
@@ -411,7 +411,7 @@ def test_cli_msg_routes_via_env(tmp_path):
         assert rows[0]["content"] == "need spec"
         conn.close()
     finally:
-        del os.environ["HERDR_DB"], os.environ["HERDR_SELF"]
+        del os.environ["SILICORISM_DB"], os.environ["SILICORISM_SELF"]
 
 
 # --- cli verify -------------------------------------------------------------

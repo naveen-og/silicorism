@@ -1,9 +1,9 @@
 """Orchestrator CLI: init the DB, enqueue tasks, run a worker pool, watch status.
 
-    python cli.py init --db orch.db
-    python cli.py add  --db orch.db --type sleep --payload 0.2 --priority 5
-    python cli.py run  --db orch.db --workers 4 --drain
-    python cli.py status --db orch.db --watch
+    python cli.py init --db silicorism.db
+    python cli.py add  --db silicorism.db --type sleep --payload 0.2 --priority 5
+    python cli.py run  --db silicorism.db --workers 4 --drain
+    python cli.py status --db silicorism.db --watch
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ import time
 
 import db
 import handlers
-import herdr_tools
+import silicorism_tools
 import tmux_orchestrator as tmux
 from worker import run_worker
 
@@ -120,7 +120,7 @@ def cmd_submit_feature(args) -> None:
     db.init_db(args.db)
     conn = db.connect(args.db)
     try:
-        p = herdr_tools.build_pipeline(
+        p = silicorism_tools.build_pipeline(
             conn, args.db, args.name, args.prompt, base=args.base,
             test_command=args.test_command, max_attempts=args.max_attempts)
     finally:
@@ -135,18 +135,18 @@ def cmd_supervise(args) -> None:
     """Window 0 = orchestrator agent (pane) + live dashboard (split pane)."""
     db.init_db(args.db)
     ext = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                       "extensions", "herdr.ts")
+                       "extensions", "silicorism.ts")
     tmux.supervisor_layout(args.db, agent=args.agent,
                            extension=ext if os.path.exists(ext) else None,
                            launch=args.launch)
     print(f"tmux session '{tmux.SESSION}' up (window 0: {args.agent} + dashboard).\n"
           f"  tmux attach -t {tmux.SESSION}\n"
-          "Run workers with HERDR_NATIVE=1 for a live pi/claude pane per task.")
+          "Run workers with SILICORISM_NATIVE=1 for a live pi/claude pane per task.")
 
 
 def _dashboard_frame(conn) -> str:
     c = db.counts(conn)
-    lines = ["\033[2J\033[H", "== herdr supervisor ==",
+    lines = ["\033[2J\033[H", "== silicorism supervisor ==",
              f"tasks  pending={c['pending']}  processing={c['processing']}  "
              f"completed={c['completed']}  failed={c['failed']}", "",
              "recent P2P messages:"]
@@ -198,7 +198,7 @@ def cmd_gc(args) -> None:
     """Reclaim worktrees whose tasks are done. --failed also clears quarantined."""
     conn = db.connect(args.db)
     try:
-        res = herdr_tools.gc_worktrees(conn, args.db, failed=args.failed)
+        res = silicorism_tools.gc_worktrees(conn, args.db, failed=args.failed)
     finally:
         conn.close()
     for p, why in res["cleaned"]:
@@ -211,13 +211,13 @@ def cmd_gc(args) -> None:
 def cmd_msg(args) -> None:
     """P2P channel from a native agent's shell: `msg send <to> <text>` / `msg poll`.
 
-    Recipient/self and db come from flags or HERDR_SELF / HERDR_DB env, so the
-    injected `herdr-msg` shell alias needs no arguments beyond the verb.
+    Recipient/self and db come from flags or SILICORISM_SELF / SILICORISM_DB env, so the
+    injected `silicorism-msg` shell alias needs no arguments beyond the verb.
     """
-    dbp = args.db or os.environ.get("HERDR_DB")
-    me = args.self_id or os.environ.get("HERDR_SELF")
+    dbp = args.db or os.environ.get("SILICORISM_DB")
+    me = args.self_id or os.environ.get("SILICORISM_SELF")
     if not dbp or not me:
-        raise SystemExit("msg: need --db/HERDR_DB and --self/HERDR_SELF")
+        raise SystemExit("msg: need --db/SILICORISM_DB and --self/SILICORISM_SELF")
     conn = db.connect(dbp)
     try:
         if args.action == "send":
@@ -256,7 +256,7 @@ def cmd_reset(args) -> None:
 
 
 def main() -> None:
-    p = argparse.ArgumentParser(prog="orchestrator")
+    p = argparse.ArgumentParser(prog="silicorism")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     def with_db(sp):
@@ -270,10 +270,10 @@ def main() -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "AI task examples:\n"
-            "  python cli.py add --db orch.db --type pi \\\n"
+            "  python cli.py add --db silicorism.db --type pi \\\n"
             "    --payload '{\"model\": \"deepseek-v4-flash\", "
             "\"prompt\": \"Scan repo and build CONTEXT.md\"}'\n"
-            "  python cli.py add --db orch.db --type claude \\\n"
+            "  python cli.py add --db silicorism.db --type claude \\\n"
             "    --payload '{\"prompt\": \"Review git diff and summarize changes\"}'"
         ),
     ))
@@ -316,7 +316,7 @@ def main() -> None:
                     help="actually start the orchestrator agent (else just lay out panes)")
     sv.set_defaults(fn=cmd_supervise)
 
-    m = sub.add_parser("msg", help="P2P channel (uses HERDR_DB/HERDR_SELF env)")
+    m = sub.add_parser("msg", help="P2P channel (uses SILICORISM_DB/SILICORISM_SELF env)")
     m.add_argument("action", choices=("send", "poll"))
     m.add_argument("target", nargs="?")
     m.add_argument("text", nargs="?")

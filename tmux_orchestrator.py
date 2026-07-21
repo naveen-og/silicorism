@@ -13,8 +13,8 @@ import subprocess
 import tempfile
 import time
 
-SESSION = "herdr-session"
-SENTINEL_DIR = os.path.join(tempfile.gettempdir(), "herdr-sentinels")
+SESSION = "silicorism-session"
+SENTINEL_DIR = os.path.join(tempfile.gettempdir(), "silicorism-sentinels")
 
 
 def _tmux(*args: str) -> subprocess.CompletedProcess:
@@ -152,11 +152,11 @@ if __name__ == "__main__":
         mark_done(7)
         run_task_in_pane(9, "pi", "/tmp/worktrees/y", "pi -p 'go'", sent)
     flat = [" ".join(c) for c in calls]
-    assert any("new-session -d -s herdr-session" in f for f in flat), flat
-    assert any("new-window -t herdr-session -n task-7 -c /tmp/worktrees/x" in f
+    assert any("new-session -d -s silicorism-session" in f for f in flat), flat
+    assert any("new-window -t silicorism-session -n task-7 -c /tmp/worktrees/x" in f
                for f in flat), flat
     assert any("rename-window" in f and "task-7-done" in f for f in flat), flat
-    assert any("new-window -t herdr-session -n task-9-pi -c /tmp/worktrees/y" in f
+    assert any("new-window -t silicorism-session -n task-9-pi -c /tmp/worktrees/y" in f
                for f in flat), flat
     assert any("send-keys" in f and "echo $? >" in f for f in flat), flat
     # exit capture reads the sentinel file

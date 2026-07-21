@@ -17,8 +17,8 @@ import handlers
 import tmux_orchestrator as tmux
 
 _STOP = False
-_TMUX = bool(os.environ.get("HERDR_TMUX"))
-_NATIVE = bool(os.environ.get("HERDR_NATIVE"))
+_TMUX = bool(os.environ.get("SILICORISM_TMUX"))
+_NATIVE = bool(os.environ.get("SILICORISM_NATIVE"))
 _CLI = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cli.py")
 
 
@@ -53,7 +53,7 @@ def _run_native(conn, task, agent_id, command: str) -> None:
 
 
 def _open_task_window(db_path, task) -> None:
-    """Under HERDR_TMUX (in-process mode), tail the task's logs in a window."""
+    """Under SILICORISM_TMUX (in-process mode), tail the task's logs in a window."""
     if not _TMUX:
         return
     cmd = f"python cli.py logs --db {db_path} --task {task['id']} --follow"
@@ -98,7 +98,7 @@ def run_worker(db_path: str, agent_id: str, *, idle_sleep: float = 0.1,
             db.heartbeat(conn, agent_id, "busy", tid)
             db.log(conn, tid, agent_id, f"claimed {task['task_type']}")
             context = db.dep_artifacts(conn, tid)
-            # HERDR_NATIVE: pi/claude tasks run as live CLI processes in a pane.
+            # SILICORISM_NATIVE: pi/claude tasks run as live CLI processes in a pane.
             native_cmd = (handlers.native_command(
                 task["task_type"], task["payload"], context, cli_path=_CLI)
                 if _NATIVE else None)
