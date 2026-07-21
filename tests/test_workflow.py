@@ -310,6 +310,25 @@ def test_native_command_claude_and_nonnative():
     assert handlers.native_command("worktree_create", "{}") is None
 
 
+def test_native_command_claude_custom_model():
+    c = handlers.native_command("claude", json.dumps({
+        "prompt": "review", "model": "opus-4.8"}))
+    assert "claude -p --model opus-4.8" in c
+
+
+def test_skill_injection_into_prompt(tmp_path):
+    import skills
+    sk = tmp_path / ".claude" / "skills"
+    sk.mkdir(parents=True)
+    (sk / "tdd.md").write_text("WRITE THE TEST FIRST")
+    cmd = handlers.native_command("pi", json.dumps({
+        "prompt": "build it", "cwd": str(tmp_path), "skills": ["tdd"]}))
+    assert "WRITE THE TEST FIRST" in cmd
+    assert "--- Skills ---" in cmd
+    # unresolved skills are silently dropped, prompt still builds
+    assert skills.load_skills(["ghost"], cwd=str(tmp_path)) == ""
+
+
 @patch("handlers.subprocess.run")
 def test_run_task_in_pane_captures_exit(run, tmp_path):
     import tmux_orchestrator as tmux

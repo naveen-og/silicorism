@@ -13,6 +13,7 @@ import subprocess
 import time
 
 import db
+import skills
 
 WORKTREE_ROOT = "/tmp/worktrees"
 
@@ -89,8 +90,11 @@ def _with_context(prompt: str, context) -> str:
 
 
 def _prompt(data: dict, context, *, native=False) -> str:
-    """Build the agent prompt: base + dep artifacts + P2P note when enabled."""
+    """Build the agent prompt: base + dep artifacts + requested skills + P2P."""
     p = _with_context(data["prompt"], context)
+    injected = skills.load_skills(data.get("skills"), cwd=data.get("cwd"))
+    if injected:
+        p += "\n\n" + injected
     if data.get("p2p"):
         p += P2P_NOTE
         if native:
@@ -125,7 +129,10 @@ def native_command(task_type: str, payload: str, context=None,
             parts += ["--thinking", data["thinking"]]
         parts.append(prompt)
     else:  # claude
-        parts = ["claude", "-p", prompt]
+        parts = ["claude", "-p"]
+        if data.get("model"):
+            parts += ["--model", data["model"]]
+        parts.append(prompt)
     return prelude + " ".join(shlex.quote(x) for x in parts)
 
 
@@ -140,9 +147,13 @@ def run_pi_agent(payload: str, context=None) -> str:
 
 
 def run_claude_agent(payload: str, context=None) -> str:
-    """claude -p "<prompt>" (cwd optional)."""
+    """claude -p [--model <model>] "<prompt>" (cwd optional)."""
     data = _parse(payload)
-    return _spawn(["claude", "-p", _prompt(data, context)], data.get("cwd"), "claude")
+    cmd = ["claude", "-p"]
+    if data.get("model"):
+        cmd += ["--model", data["model"]]
+    cmd.append(_prompt(data, context))
+    return _spawn(cmd, data.get("cwd"), "claude")
 
 
 # --- workflow handlers ------------------------------------------------------
