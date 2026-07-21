@@ -12,8 +12,10 @@ import argparse
 import json
 import multiprocessing as mp
 import os
+import re
 import shutil
 import signal
+import subprocess
 import time
 
 import db
@@ -23,6 +25,30 @@ import tmux_orchestrator as tmux
 from worker import run_worker
 
 _POOL: list[mp.Process] = []
+
+
+def _git_root(cwd: str | None = None) -> str | None:
+    """Top level of the git repo containing cwd, or None if not in one."""
+    try:
+        r = subprocess.run(["git", "rev-parse", "--show-toplevel"],
+                           capture_output=True, text=True, cwd=cwd, timeout=10)
+    except OSError:
+        return None
+    return r.stdout.strip() if r.returncode == 0 else None
+
+
+def default_db(cwd: str | None = None) -> str:
+    """Per-repo DB path so `silicorism` works from any CWD without --db.
+
+    Inside a git repo: <root>/.git/silicorism.db (kept out of the work tree).
+    Otherwise: ~/.config/silicorism/repos/<cwd-slug>/silicorism.db.
+    """
+    root = _git_root(cwd)
+    if root:
+        return os.path.join(root, ".git", "silicorism.db")
+    slug = re.sub(r"[^a-z0-9]+", "-", (cwd or os.getcwd()).lower()).strip("-") or "repo"
+    d = os.path.expanduser(os.path.join("~/.config/silicorism/repos", slug))
+    return os.path.join(d, "silicorism.db")
 
 
 def cmd_init(args) -> None:
@@ -260,7 +286,8 @@ def main() -> None:
     sub = p.add_subparsers(dest="cmd", required=True)
 
     def with_db(sp):
-        sp.add_argument("--db", required=True)
+        sp.add_argument("--db", default=None,
+                        help="SQLite path (default: <repo>/.git/silicorism.db)")
         return sp
 
     with_db(sub.add_parser("init")).set_defaults(fn=cmd_init)
@@ -339,6 +366,10 @@ def main() -> None:
     g.set_defaults(fn=cmd_gc)
 
     args = p.parse_args()
+    # Resolve the per-repo default DB for every command except `msg`, which
+    # has its own --db/SILICORISM_DB env fallback.
+    if args.cmd != "msg" and getattr(args, "db", None) is None:
+        args.db = default_db()
     args.fn(args)
 
 

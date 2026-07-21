@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "silicorism"
+version = "0.1.0"
+description = "Silicon + Tribalism: high-throughput multi-agent task orchestrator"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.scripts]
+silicorism = "cli:main"
+
+[tool.setuptools]
+# Flat single-file modules — no package dir. `pip install -e .` / pipx expose
+# the `silicorism` entry point globally; it resolves its DB relative to CWD.
+py-modules = ["cli", "db", "handlers", "worker", "silicorism_tools", "tmux_orchestrator"]

@@ -420,6 +420,25 @@ def test_cli_msg_routes_via_env(tmp_path):
         del os.environ["SILICORISM_DB"], os.environ["SILICORISM_SELF"]
 
 
+# --- cli default_db resolution ----------------------------------------------
+
+def test_default_db_git_vs_nongit(tmp_path):
+    import cli
+    # inside a git repo -> <root>/.git/silicorism.db
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True, timeout=30)
+    got = cli.default_db(str(repo))
+    assert got == str((repo / ".git" / "silicorism.db"))
+    # outside git -> ~/.config/silicorism/repos/<slug>/silicorism.db
+    plain = tmp_path / "Plain Dir"
+    plain.mkdir()
+    got2 = cli.default_db(str(plain))
+    assert got2.endswith("/silicorism.db")
+    assert "/.config/silicorism/repos/" in got2
+    assert ".git" not in got2
+
+
 # --- cli verify -------------------------------------------------------------
 
 def test_cli_verify_lists_binaries():
