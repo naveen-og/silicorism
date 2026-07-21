@@ -16,4 +16,5 @@ silicorism = "cli:main"
 [tool.setuptools]
 # Flat single-file modules — no package dir. `pip install -e .` / pipx expose
 # the `silicorism` entry point globally; it resolves its DB relative to CWD.
-py-modules = ["cli", "db", "handlers", "worker", "silicorism_tools", "tmux_orchestrator"]
+py-modules = ["cli", "db", "handlers", "worker", "silicorism_tools",
+              "tmux_orchestrator", "skills", "silicorism_mcp"]
