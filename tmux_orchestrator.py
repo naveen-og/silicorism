@@ -15,6 +15,23 @@ import time
 
 SESSION = "silicorism-session"
 SENTINEL_DIR = os.path.join(tempfile.gettempdir(), "silicorism-sentinels")
+CONFIG_DIR = os.path.expanduser("~/.config/silicorism")
+LOG_DIR = os.path.join(CONFIG_DIR, "logs")
+
+
+def log_path(task_id) -> str:
+    """Path to a task's captured stdout/stderr log (dir created on demand)."""
+    os.makedirs(LOG_DIR, exist_ok=True)
+    return os.path.join(LOG_DIR, f"task-{task_id}.log")
+
+
+def read_log_tail(path: str, max_chars: int = 2000) -> str:
+    """Return the tail of a captured log for artifact hand-off (empty if none)."""
+    try:
+        data = open(path, encoding="utf-8", errors="replace").read()
+    except OSError:
+        return ""
+    return data[-max_chars:].strip()
 
 
 def _tmux(*args: str) -> subprocess.CompletedProcess:
@@ -69,22 +86,29 @@ def sentinel_path(task_id) -> str:
 
 
 def run_task_in_pane(task_id, task_type: str, cwd: str, command: str,
-                     sentinel: str, *, session: str = SESSION) -> str:
+                     sentinel: str, *, session: str = SESSION,
+                     logfile: str | None = None) -> str:
     """Open task-<id>-<type> at <cwd> and run <command> live, capturing exit.
 
-    The command's exit code is written atomically to <sentinel> so the worker
-    can poll it; remain-on-exit keeps the pane open for post-mortem inspection.
+    stdout+stderr both stream live to the pane AND tee to <logfile> so the
+    worker can read a rich artifact for downstream tasks. The command's own
+    exit code (not tee's) is written atomically to <sentinel> for polling;
+    remain-on-exit keeps the pane open for post-mortem inspection.
     Returns the window name.
     """
     name = f"task-{task_id}-{task_type}"
     if os.path.exists(sentinel):
         os.remove(sentinel)
+    if logfile is None:
+        logfile = log_path(task_id)
     _tmux("new-window", "-t", session, "-n", name, "-c", cwd)
     target = _window_target(session, name)
     _tmux("set-option", "-t", target, "remain-on-exit", "on")
     tmp = shlex.quote(sentinel + ".tmp")
     fin = shlex.quote(sentinel)
-    wrapped = f"{command}; echo $? > {tmp} && mv {tmp} {fin}"
+    log = shlex.quote(logfile)
+    # brace group's exit ($?) captured before the pipe, so tee doesn't mask it.
+    wrapped = f"{{ {command}; echo $? > {tmp}; }} 2>&1 | tee {log}; mv {tmp} {fin}"
     _tmux("send-keys", "-t", target, wrapped, "Enter")
     return name
 
@@ -159,6 +183,14 @@ if __name__ == "__main__":
     assert any("new-window -t silicorism-session -n task-9-pi -c /tmp/worktrees/y" in f
                for f in flat), flat
     assert any("send-keys" in f and "echo $? >" in f for f in flat), flat
+    # stdout/stderr tee'd to a log file for the downstream artifact
+    assert any("| tee " in f and "task-9.log" in f for f in flat), flat
+    # log tail is read back as the artifact
+    lp = log_path("test")
+    open(lp, "w").write("line1\nCONTEXT.md written\n")
+    assert read_log_tail(lp) == "line1\nCONTEXT.md written"
+    assert read_log_tail("/no/such/log") == ""
+    os.remove(lp)
     # exit capture reads the sentinel file
     os.makedirs(SENTINEL_DIR, exist_ok=True)
     open(sent, "w").write("0\n")

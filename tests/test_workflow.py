@@ -339,7 +339,9 @@ def test_worker_native_completes_and_fails(mock_tmux, tmp_path):
     db.init_db(dbp)
     conn = db.connect(dbp)
     mock_tmux.sentinel_path.side_effect = lambda tid: str(tmp_path / f"{tid}.exit")
+    mock_tmux.log_path.side_effect = lambda tid: str(tmp_path / f"{tid}.log")
     mock_tmux.run_task_in_pane.return_value = "task-1-pi"
+    mock_tmux.read_log_tail.return_value = "scout wrote CONTEXT.md"
 
     tid = db.add_task(conn, "pi", json.dumps({"prompt": "x", "cwd": "/w"}))
     task = conn.execute("SELECT * FROM tasks WHERE id=?", (tid,)).fetchone()
@@ -347,6 +349,10 @@ def test_worker_native_completes_and_fails(mock_tmux, tmp_path):
     worker._run_native(conn, task, "w0", "pi -p 'x'")
     assert db.counts(conn)["completed"] == 1
     mock_tmux.mark_done.assert_called_with(tid, failed=False)
+    # captured log tail becomes the artifact for downstream deps
+    art = conn.execute("SELECT output_artifact FROM tasks WHERE id=?",
+                       (tid,)).fetchone()["output_artifact"]
+    assert art == "scout wrote CONTEXT.md"
 
     tid2 = db.add_task(conn, "pi", json.dumps({"prompt": "y", "cwd": "/w"}))
     task2 = conn.execute("SELECT * FROM tasks WHERE id=?", (tid2,)).fetchone()

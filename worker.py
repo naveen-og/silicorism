@@ -41,13 +41,17 @@ def _run_native(conn, task, agent_id, command: str) -> None:
     tid = task["id"]
     cwd = _task_cwd(task)
     sentinel = tmux.sentinel_path(tid)
+    logf = tmux.log_path(tid)
     tmux.ensure_session()
-    win = tmux.run_task_in_pane(tid, task["task_type"], cwd, command, sentinel)
+    win = tmux.run_task_in_pane(tid, task["task_type"], cwd, command, sentinel,
+                                logfile=logf)
     db.log(conn, tid, agent_id, f"native pane {win} at {cwd}")
     code = tmux.wait_for_exit(sentinel, stop=lambda: _STOP)
     if code != 0:
         raise RuntimeError(f"native agent exit {code if code is not None else 'timeout'}")
-    db.complete_task(conn, tid, artifact=f"native pane {win} exit 0")
+    # Rich artifact = the agent's actual output, so downstream deps get context.
+    artifact = tmux.read_log_tail(logf) or f"native pane {win} exit 0"
+    db.complete_task(conn, tid, artifact=artifact)
     db.log(conn, tid, agent_id, f"completed (native): {win}")
     tmux.mark_done(tid, failed=False)
 
