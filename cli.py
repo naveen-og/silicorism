@@ -298,8 +298,8 @@ def main() -> None:
         epilog=(
             "AI task examples:\n"
             "  python cli.py add --db silicorism.db --type pi \\\n"
-            "    --payload '{\"model\": \"deepseek-v4-flash\", "
-            "\"prompt\": \"Scan repo and build CONTEXT.md\"}'\n"
+            "    --payload '{\"model\": \"opencode/deepseek-v4-flash-free\", "
+            "\"thinking\": \"high\", \"prompt\": \"Scan repo and build CONTEXT.md\"}'\n"
             "  python cli.py add --db silicorism.db --type claude \\\n"
             "    --payload '{\"prompt\": \"Review git diff and summarize changes\"}'"
         ),
