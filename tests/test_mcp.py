@@ -25,12 +25,18 @@ def test_initialized_notification_is_silent():
     assert mcp.handle({"jsonrpc": "2.0", "method": "notifications/initialized"}) is None
 
 
+def test_initialize_carries_orchestration_instructions():
+    r = mcp.handle({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
+    instr = r["result"]["instructions"]
+    assert "ZERO ASSUMPTIONS" in instr and "silicorism_list_skills" in instr
+
+
 def test_tools_list_exposes_canonical_tools():
     r = mcp.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
     names = {t["name"] for t in r["result"]["tools"]}
     assert names == {"silicorism_plan_and_submit", "silicorism_get_status",
                      "silicorism_start_workers", "silicorism_gc",
-                     "silicorism_verify_and_continue"}
+                     "silicorism_verify_and_continue", "silicorism_list_skills"}
     # every tool advertises an inputSchema (no handler leakage)
     for t in r["result"]["tools"]:
         assert set(t) == {"name", "description", "inputSchema"}
@@ -114,4 +120,14 @@ def test_end_to_end_stdio_handshake(tmp_path):
     # initialize + tools/list responses; the notification produced none
     assert len(lines) == 2
     assert lines[0]["result"]["serverInfo"]["name"] == "silicorism"
-    assert len(lines[1]["result"]["tools"]) == 5
+    assert len(lines[1]["result"]["tools"]) == 6
+
+
+def test_list_skills_tool(tmp_path):
+    (tmp_path / ".claude" / "skills").mkdir(parents=True)
+    (tmp_path / ".claude" / "skills" / "review.md").write_text("REVIEW RULES")
+    r = mcp.handle({"jsonrpc": "2.0", "id": 8, "method": "tools/call",
+                    "params": {"name": "silicorism_list_skills",
+                               "arguments": {"cwd": str(tmp_path)}}})
+    inv = json.loads(r["result"]["content"][0]["text"])
+    assert any(s["name"] == "review" and s["harness"] == "claude" for s in inv)

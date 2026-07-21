@@ -397,6 +397,14 @@ def heartbeats(conn) -> list[sqlite3.Row]:
     ).fetchall()
 
 
+def recent_logs(conn, limit=20) -> list[sqlite3.Row]:
+    """Newest execution-log rows across all tasks (for the status aggregation)."""
+    return conn.execute(
+        "SELECT task_id, agent_id, level, message, timestamp FROM execution_logs "
+        "ORDER BY id DESC LIMIT ?", (limit,)
+    ).fetchall()
+
+
 def checkpoint(conn) -> None:
     """Non-blocking WAL truncation for idle loops."""
     conn.execute("PRAGMA wal_checkpoint(PASSIVE)")

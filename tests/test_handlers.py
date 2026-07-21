@@ -19,13 +19,24 @@ def _proc(returncode=0, stdout="ok", stderr=""):
     return m
 
 
+def test_resolve_model_aliases():
+    assert handlers.resolve_model("mimo-2.5") == "opencode/mimo-v2.5-free"
+    assert handlers.resolve_model("nemotron-3-ultra") == "opencode/nemotron-3-ultra-free"
+    # full opencode ids and unknown strings pass through untouched
+    assert handlers.resolve_model("opencode/hy3-free") == "opencode/hy3-free"
+    assert handlers.resolve_model("gpt-4o") == "gpt-4o"
+    assert handlers.resolve_model(None) is None
+
+
 @patch("handlers.subprocess.run")
 def test_pi_full_payload(run):
     run.return_value = _proc(stdout="done")
     out = handlers.run("pi", json.dumps({
         "prompt": "hi", "model": "hy3", "thinking": "max", "cwd": "/work"}))
     assert out == "done"
-    assert run.call_args.args[0] == ["pi", "--model", "hy3", "--thinking", "max", "hi"]
+    # friendly name resolves to the opencode free id
+    assert run.call_args.args[0] == [
+        "pi", "--model", "opencode/hy3-free", "--thinking", "max", "hi"]
     assert run.call_args.kwargs["cwd"] == "/work"
 
 

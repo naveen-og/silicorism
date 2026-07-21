@@ -210,6 +210,7 @@ def get_status(conn) -> dict:
         "failures": verdict["failures"],
         "agents": [dict(h) for h in db.heartbeats(conn)],
         "messages": [dict(m) for m in db.recent_messages(conn, 20)],
+        "logs": [dict(r) for r in db.recent_logs(conn, 20)],
         "worktrees": [dict(w) for w in db.worktrees(conn)],
     }
 

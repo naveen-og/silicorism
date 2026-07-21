@@ -20,6 +20,24 @@ WORKTREE_ROOT = "/tmp/worktrees"
 # Task types that run as native CLI agents in a live tmux pane (SILICORISM_NATIVE).
 NATIVE_AGENTS = ("pi", "claude")
 
+DEFAULT_PI_MODEL = "opencode/deepseek-v4-flash-free"
+
+# Friendly canonical name -> opencode free-tier id, so DAG nodes can say
+# "nemotron-3-ultra" and get the unlimited free model. Full ids pass through.
+MODEL_ALIASES = {
+    "deepseek-v4-flash": "opencode/deepseek-v4-flash-free",
+    "nemotron-3-ultra": "opencode/nemotron-3-ultra-free",
+    "hy3": "opencode/hy3-free",
+    "mimo-2.5": "opencode/mimo-v2.5-free",
+    "mimo-v2.5": "opencode/mimo-v2.5-free",
+    "north-mini-code": "opencode/north-mini-code-free",
+}
+
+
+def resolve_model(model: str | None) -> str | None:
+    """Map a friendly canonical name to its opencode id; pass full ids through."""
+    return MODEL_ALIASES.get(model, model) if model else model
+
 P2P_NOTE = (
     "\n\n--- Coordination ---\n"
     "You are one agent in a pool sharing a P2P channel. If architectural intent "
@@ -124,7 +142,7 @@ def native_command(task_type: str, payload: str, context=None,
                    f"export SILICORISM_SELF={shlex.quote(agent_id)}; "
                    f"silicorism-msg(){{ python {shlex.quote(cli_path)} msg \"$@\"; }}; ")
     if task_type == "pi":
-        parts = ["pi", "-p", "--model", data.get("model") or "opencode/deepseek-v4-flash-free"]
+        parts = ["pi", "-p", "--model", resolve_model(data.get("model")) or DEFAULT_PI_MODEL]
         if data.get("thinking"):
             parts += ["--thinking", data["thinking"]]
         parts.append(prompt)
@@ -139,7 +157,7 @@ def native_command(task_type: str, payload: str, context=None,
 def run_pi_agent(payload: str, context=None) -> str:
     """pi --model <model> [--thinking <thinking>] "<prompt>" (cwd optional)."""
     data = _parse(payload)
-    cmd = ["pi", "--model", data.get("model") or "opencode/deepseek-v4-flash-free"]
+    cmd = ["pi", "--model", resolve_model(data.get("model")) or DEFAULT_PI_MODEL]
     if data.get("thinking"):
         cmd += ["--thinking", data["thinking"]]
     cmd.append(_prompt(data, context))

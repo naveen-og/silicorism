@@ -296,7 +296,7 @@ def test_native_command_pi_with_p2p():
     assert cmd.startswith("export SILICORISM_DB=")
     assert "SILICORISM_SELF=fixer-x" in cmd
     assert "silicorism-msg()" in cmd
-    assert "pi -p --model hy3" in cmd
+    assert "pi -p --model opencode/hy3-free" in cmd
     assert "build it" in cmd
 
 

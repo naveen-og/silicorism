@@ -20,8 +20,32 @@ import sys
 import cli
 import db
 import silicorism_tools
+import skills
 
 PROTOCOL = "2025-11-25"
+
+# Operating protocol the orchestrating client (Claude Code) must follow. Sent as
+# the MCP `initialize.instructions` so the client adopts it when this server loads.
+INSTRUCTIONS = (
+    "You are the Silicorism orchestrator. Follow this protocol every time:\n"
+    "1. DISCOVER: call silicorism_list_skills to inventory available skills before "
+    "planning.\n"
+    "2. ZERO ASSUMPTIONS: if the user's request is ambiguous, missing specs, or "
+    "lacks environment/test context, STOP and ask targeted clarifying questions. "
+    "Do NOT queue any tasks until it is unambiguous.\n"
+    "3. MASTER PLAN: evaluate multiple implementation routes, pick the optimal one, "
+    "and present a plan with (a) selected route + trade-off rationale, (b) the DAG "
+    "nodes with their skill assignments, and (c) each node's model, harness, and "
+    "thinking level. Bind discovered skills to the nodes that need them.\n"
+    "4. SUBMIT: call silicorism_plan_and_submit with `nodes` (the custom DAG). It "
+    "auto-starts native tmux-pane workers. Tell the user to watch with "
+    "`tmux attach -t silicorism-session`.\n"
+    "5. VERIFY & LOOP: poll silicorism_get_status / silicorism_verify_and_continue. "
+    "If not satisfied, inspect the failed task artifacts, formulate a corrective "
+    "DAG, and resubmit until every requirement and test gate is 100% met.\n"
+    "Models are opencode free tier (unlimited): use friendly names deepseek-v4-flash, "
+    "nemotron-3-ultra, hy3, mimo-2.5, north-mini-code with thinking=high."
+)
 HERE = os.path.dirname(os.path.abspath(__file__))
 CLI = os.path.join(HERE, "cli.py")
 
@@ -125,6 +149,11 @@ def _start_workers(args: dict) -> str:
     return _spawn_workers(dbp, int(args.get("count") or 3))
 
 
+def _list_skills(args: dict) -> str:
+    """Inventory available skills (global + local, both harnesses) for planning."""
+    return json.dumps(skills.inventory(args.get("cwd")))
+
+
 def _gc(args: dict) -> str:
     """Reclaim finished worktrees (failed=true also clears quarantined)."""
     dbp = _db(args)
@@ -160,7 +189,9 @@ TOOLS = [
                                            "description": "ids of prerequisite nodes"},
                             "harness": {"type": "string", "enum": ["pi", "claude"]},
                             "model": {"type": "string",
-                                      "description": "e.g. opencode/nemotron-3-ultra-free"},
+                                      "description": "friendly name (deepseek-v4-flash, "
+                                      "nemotron-3-ultra, hy3, mimo-2.5, north-mini-code) "
+                                      "or full opencode id"},
                             "thinking": {"type": "string",
                                          "description": "off|minimal|low|medium|high|xhigh|max"},
                             "skills": {"type": "array", "items": {"type": "string"}},
@@ -205,9 +236,22 @@ TOOLS = [
         "handler": _verify_and_continue,
     },
     {
+        "name": "silicorism_list_skills",
+        "description": "Inventory all available skills (global ~/.claude, ~/.pi and "
+                       "local ./.claude, ./.pi) with name, harness, scope, and a "
+                       "one-line description. Call this FIRST when planning so skills "
+                       "can be bound to DAG nodes.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"cwd": {"type": "string"}},
+        },
+        "handler": _list_skills,
+    },
+    {
         "name": "silicorism_get_status",
-        "description": "Live DAG execution status (task counts, agents), recent "
-                       "P2P messages, and worktree states.",
+        "description": "Aggregated DAG status: task counts + satisfied verdict, each "
+                       "failed task's artifact + last error, agents, recent execution "
+                       "logs, P2P messages, and worktree states.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -271,6 +315,7 @@ def handle(msg: dict) -> dict | None:
             "protocolVersion": pv,
             "capabilities": {"tools": {"listChanged": False}},
             "serverInfo": {"name": "silicorism", "version": "0.1.0"},
+            "instructions": INSTRUCTIONS,
         })
     if method == "notifications/initialized" or method == "ping":
         return _result(mid, {}) if mid is not None else None

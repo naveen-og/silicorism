@@ -9,6 +9,7 @@ of the same name (they are scanned last, and last write wins).
 from __future__ import annotations
 
 import os
+import re
 
 # Global first, local (CWD-relative) last so local overrides global.
 SEARCH_DIRS = ("~/.claude/skills", "~/.pi/skills", ".claude/skills", ".pi/skills")
@@ -54,6 +55,57 @@ def load_skills(names, cwd: str | None = None, max_chars: int = 4000) -> str:
     return "--- Skills ---\n" + "\n\n".join(parts) if parts else ""
 
 
+def _describe(path: str) -> str:
+    """One-line summary: frontmatter `description:` or first real line."""
+    try:
+        head = open(path, encoding="utf-8", errors="replace").read(800)
+    except OSError:
+        return ""
+    m = re.search(r"^description:\s*(.+)$", head, re.M)
+    if m:
+        return m.group(1).strip().strip("\"'")[:200]
+    for line in head.splitlines():
+        s = line.strip().lstrip("#").strip()
+        if s and s != "---" and not s.startswith("description:"):
+            return s[:200]
+    return ""
+
+
+def inventory(cwd: str | None = None) -> list[dict]:
+    """Discover every available skill across global + local harness dirs.
+
+    Returns [{name, harness, scope, path, description}], local overriding global
+    of the same name (matching load_skills). Feeds the planner's discovery phase.
+    """
+    base = cwd or os.getcwd()
+    found: dict[str, dict] = {}
+    for spec in SEARCH_DIRS:
+        scope = "global" if spec.startswith("~") else "local"
+        harness = "pi" if ".pi/" in spec else "claude"
+        d = os.path.expanduser(spec)
+        if not os.path.isabs(d):
+            d = os.path.join(base, d)
+        if not os.path.isdir(d):
+            continue
+        for entry in sorted(os.listdir(d)):
+            full = os.path.join(d, entry)
+            if entry.endswith(".md") and os.path.isfile(full):
+                name, skill_path = entry[:-3], full
+            elif os.path.isdir(full):
+                skill_path = next(
+                    (c for c in (os.path.join(full, "SKILL.md"),
+                                 os.path.join(full, "skill.md")) if os.path.isfile(c)),
+                    None)
+                if not skill_path:
+                    continue
+                name = entry
+            else:
+                continue
+            found[name] = {"name": name, "harness": harness, "scope": scope,
+                           "path": skill_path, "description": _describe(skill_path)}
+    return sorted(found.values(), key=lambda s: s["name"])
+
+
 if __name__ == "__main__":
     import tempfile
     with tempfile.TemporaryDirectory() as d:
@@ -68,4 +120,14 @@ if __name__ == "__main__":
         assert "REVIEW RULES" in out and "TDD RULES" in out and "--- Skills ---" in out
         assert load_skills([], cwd=d) == ""
         assert load_skills(["nope"], cwd=d) == ""
+        # inventory finds both, tags harness/scope, extracts a description
+        open(os.path.join(d, ".claude", "skills", "fm.md"), "w").write(
+            "---\ndescription: does a thing\n---\nbody")
+        inv = {s["name"]: s for s in inventory(d)}
+        # local temp skills present (real global skills may also appear, so subset)
+        assert {"review", "tdd", "fm"} <= set(inv)
+        assert inv["tdd"]["harness"] == "pi" and inv["review"]["harness"] == "claude"
+        assert inv["tdd"]["scope"] == "local"
+        assert inv["fm"]["description"] == "does a thing"
+        assert inv["review"]["description"] == "REVIEW RULES"
     print("skills OK")

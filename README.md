@@ -49,8 +49,14 @@ into the agent prompt.
 ```bash
 claude mcp add silicorism --scope user -- python /path/to/silicorism_mcp.py
 ```
-Tools: `silicorism_plan_and_submit`, `silicorism_get_status`,
-`silicorism_start_workers`, `silicorism_gc`, `silicorism_verify_and_continue`.
+Tools: `silicorism_list_skills`, `silicorism_plan_and_submit`,
+`silicorism_get_status`, `silicorism_start_workers`, `silicorism_gc`,
+`silicorism_verify_and_continue`.
+
+On connect the server sends an `instructions` protocol the orchestrator follows:
+**discover skills → clarify (zero assumptions) → master plan → submit → verify &
+loop**. `silicorism_list_skills` inventories skills (name/harness/scope/description)
+so they can be bound to DAG nodes during planning.
 
 **Orchestrator loop.** `silicorism_plan_and_submit` submits a plan **and
 auto-starts native-pane workers** in one call. Pass `prompt` for the default
@@ -62,7 +68,9 @@ lets the orchestrator resubmit a corrective DAG and re-run until satisfied.
 
 Default per-role models are the **opencode free tier** (unlimited, `thinking:high`):
 scout `opencode/deepseek-v4-flash-free`, builder `opencode/nemotron-3-ultra-free`,
-fixer `opencode/hy3-free` — all overridable per node.
+fixer `opencode/hy3-free` — all overridable per node. Nodes may use friendly names
+(`deepseek-v4-flash`, `nemotron-3-ultra`, `hy3`, `mimo-2.5`, `north-mini-code`) which
+resolve to the opencode free ids, or a full model id.
 
 ## Concurrency model
 - Every state write goes through `db.immediate()` = `BEGIN IMMEDIATE` + exponential
