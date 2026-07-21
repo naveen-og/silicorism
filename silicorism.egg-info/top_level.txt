@@ -1,6 +1,0 @@
-cli
-db
-handlers
-silicorism_tools
-tmux_orchestrator
-worker

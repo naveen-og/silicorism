@@ -6,3 +6,6 @@ __pycache__/
 *.db-wal
 *.db-shm
 orch.db
+*.egg-info/
+build/
+dist/
