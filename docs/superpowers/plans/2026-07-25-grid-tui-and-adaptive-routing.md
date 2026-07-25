@@ -1104,7 +1104,24 @@ In `silicorism_tools.py`, add below `DEFAULT_THINKING`:
 SIMPLE_MODEL = "bedrock-mantle/qwen.qwen3-coder-480b-a35b-instruct"
 ```
 
-Rename the existing `build_pipeline` body to `_build_standard` (keeping every line as-is), then add the dispatcher and the simple shape:
+Rename the existing `build_pipeline` body to `_build_standard`, keeping every line as-is
+except its signature default, which becomes `test_command=None` with an explicit
+fallback on the first line of the body:
+
+```python
+def _build_standard(conn, db_path, name, prompt, *, base="main",
+                    test_command=None, max_attempts=3, merge=False) -> dict:
+    """Insert the DAG: worktree->scout->builder->fixer->verify[->merge]->cleanup."""
+    test_command = test_command or "pytest -q"
+    # ... rest of the existing body unchanged ...
+```
+
+The default has to move off `"pytest -q"` because `simple` distinguishes "no test
+command given" from one that was: a truthy default would force a verify gate onto
+every simple run and fail a project that has no tests. `standard` keeps its old
+effective behaviour through the fallback line.
+
+Then add the dispatcher and the simple shape:
 
 ```python
 def _build_simple(conn, db_path, name, prompt, *, test_command=None, cwd=None) -> dict:
@@ -1129,13 +1146,12 @@ def _build_simple(conn, db_path, name, prompt, *, test_command=None, cwd=None) -
 
 
 def build_pipeline(conn, db_path, name, prompt, *, base="main",
-                   test_command="pytest -q", max_attempts=3, merge=False,
+                   test_command=None, max_attempts=3, merge=False,
                    complexity="standard", cwd=None) -> dict:
     """Build a DAG sized to the request. Tiers:
 
       simple    one agent (qwen3-coder-480b) in cwd, verify iff test_command
       standard  worktree -> scout -> builder -> fixer -> verify [-> merge] -> cleanup
-      complex   parallel builders in separate worktrees joined by an integrator
 
     An unknown tier degrades to `standard` — a typo in a planning hint must
     not fail a submit.
@@ -1143,23 +1159,15 @@ def build_pipeline(conn, db_path, name, prompt, *, base="main",
     if complexity == "simple":
         return _build_simple(conn, db_path, name, prompt,
                              test_command=test_command, cwd=cwd)
-    if complexity == "complex":
-        return _build_complex(conn, db_path, name, prompt, base=base,
-                              test_command=test_command,
-                              max_attempts=max_attempts, merge=merge)
     return _build_standard(conn, db_path, name, prompt, base=base,
                            test_command=test_command,
                            max_attempts=max_attempts, merge=merge)
 ```
 
-Note: `_build_complex` arrives in Task 6. Until then, add this stub immediately above `build_pipeline` so the module imports cleanly:
-
-```python
-def _build_complex(conn, db_path, name, prompt, **kw) -> dict:
-    raise NotImplementedError("complex tier lands in Task 6")
-```
-
-`_build_simple` calls `build_pipeline`'s caller with `test_command=None` to get the no-verify shape; the MCP layer passes `None` when the planner omits it (Task 7).
+The `complex` tier is not referenced here — Task 6 adds its branch to this dispatcher
+along with the function itself. Do not add a placeholder or a stub for it: until Task 6
+lands, `complexity="complex"` correctly falls through to `standard`, which is the same
+degradation an unknown tier gets.
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
@@ -1376,9 +1384,28 @@ def test_complex_cleans_up_both_worktrees_last(tmp_path):
 - [ ] **Step 6: Run to verify it fails**
 
 Run: `.venv/bin/python -m pytest tests/test_tiers.py -q -k complex`
-Expected: FAIL — `NotImplementedError: complex tier lands in Task 6`
+Expected: FAIL — `complexity="complex"` currently falls through to the standard shape, so
+`set(t) >= {"worktree_a", ...}` fails on the missing keys (`KeyError` / assertion error).
 
-- [ ] **Step 7: Replace the `_build_complex` stub**
+- [ ] **Step 7: Add `_build_complex` and wire it into the dispatcher**
+
+First extend the dispatcher in `build_pipeline`, inserting the branch before the
+standard fallback:
+
+```python
+    if complexity == "complex":
+        return _build_complex(conn, db_path, name, prompt, base=base,
+                              test_command=test_command,
+                              max_attempts=max_attempts, merge=merge)
+```
+
+Also add `complex` to the docstring's tier list:
+
+```
+      complex   parallel builders in separate worktrees joined by an integrator
+```
+
+Then add the function itself:
 
 In `silicorism_tools.py`:
 
@@ -1393,13 +1420,14 @@ SPLIT_NOTE = (
 
 
 def _build_complex(conn, db_path, name, prompt, *, base="main",
-                   test_command="pytest -q", max_attempts=3, merge=False) -> dict:
+                   test_command=None, max_attempts=3, merge=False) -> dict:
     """Two builders in separate worktrees, joined by a merge + integrator agent.
 
     The scout partitions the work; each builder receives that partition through
     the existing artifact hand-off (dep_artifacts -> _with_context), so
     builder-b needs no file from worktree-a.
     """
+    test_command = test_command or "pytest -q"
     name_a, name_b = f"{name}-a", f"{name}-b"
     path_a = os.path.join(WORKTREE_ROOT, name_a)
     path_b = os.path.join(WORKTREE_ROOT, name_b)
@@ -1654,11 +1682,10 @@ In `_plan_and_submit`, pass the tier through to `build_pipeline`:
             out["mode"] = "pipeline"
 ```
 
-Because `test_command` now defaults to `None` here, `standard` must keep its own default. In `_build_standard` and `_build_complex`, change the signature default to `test_command="pytest -q"` and add at the top of each:
-
-```python
-    test_command = test_command or "pytest -q"
-```
+`test_command` already defaults to `None` through `build_pipeline` (Task 5), with
+`_build_standard` and `_build_complex` applying the `"pytest -q"` fallback internally,
+so no signature change is needed here. Passing `args.get("test_command")` straight
+through is what lets a `simple` submit with no test command skip the verify gate.
 
 Add the tool definition to `TOOLS`. Dispatch is by the `"handler"` key inside each
 entry (`silicorism_mcp.py:327` does `tool["handler"](...)`), so there is no separate
@@ -1888,4 +1915,12 @@ git push
 
 **Type consistency:** `grid_pane` returns `(window, pane_id)` in Task 2 and is destructured that way in Task 3. `mark_pane_done(pane_id, *, failed)` matches its call in `worker._mark_pane`. `build_frame(tasks, messages, counts, *, width, now)` matches its call in `dashboard.frame`. `wait_for_settle`'s `settled` key is what `test_wait.py` asserts and what `_wait` serialises. `_build_complex` is called with the keyword arguments its signature declares.
 
-**Known ordering constraint:** Task 5 introduces a `_build_complex` stub that raises `NotImplementedError`; Task 6 replaces it. Tasks 5 and 6 must not be run out of order or in parallel.
+**Known ordering constraint:** Task 6 extends the `build_pipeline` dispatcher that Task 5
+creates, so 5 must land before 6. No stub or placeholder bridges them — until Task 6,
+`complexity="complex"` degrades to `standard`, the same as any unrecognised tier.
+
+**Pre-flight fixes (applied before execution):** `build_pipeline`'s `test_command`
+default moved from `"pytest -q"` to `None` in Task 5 rather than Task 7, because Task 5's
+own tests require `simple` to distinguish an absent test command from a supplied one. The
+`_build_complex` stub was removed in favour of Task 6 adding both the function and its
+dispatcher branch.
