@@ -40,6 +40,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     depends_on      TEXT,            -- JSON array of prerequisite task ids
     output_artifact TEXT,            -- stdout/return value of a completed task
     worktree_path   TEXT,            -- dedicated git worktree for this task
+    pane_target     TEXT,            -- tmux "<window>.<pane_id>" showing this task
+    started_at      TEXT,            -- stamped when a worker claims the task
     created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
     updated_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );
@@ -88,7 +90,13 @@ CREATE TABLE IF NOT EXISTS worktrees (
 
 
 def now() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%fZ")
+    """UTC timestamp matching SQLite's strftime('%Y-%m-%dT%H:%M:%fZ') exactly.
+
+    Python's %f is microseconds; SQLite's is SS.SSS. Formatting seconds
+    explicitly and trimming to milliseconds is what makes the two agree, so
+    created_at (SQLite default) and updated_at (this function) are comparable.
+    """
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
 
 
 def connect(db_path: str | Path) -> sqlite3.Connection:
@@ -109,6 +117,8 @@ _MIGRATIONS = (
     ("depends_on", "TEXT"),
     ("output_artifact", "TEXT"),
     ("worktree_path", "TEXT"),
+    ("pane_target", "TEXT"),
+    ("started_at", "TEXT"),
 )
 
 
@@ -212,9 +222,9 @@ def claim_task(conn, agent_id) -> sqlite3.Row | None:
         if row is None:
             return None
         c.execute(
-            "UPDATE tasks SET status='processing', agent_id=?, updated_at=? "
-            "WHERE id=?",
-            (agent_id, now(), row["id"]),
+            "UPDATE tasks SET status='processing', agent_id=?, started_at=?, "
+            "updated_at=? WHERE id=?",
+            (agent_id, now(), now(), row["id"]),
         )
         claimed["row"] = row
     return claimed["row"]
@@ -227,6 +237,17 @@ def complete_task(conn, task_id, artifact: str | None = None) -> None:
             "updated_at=? WHERE id=?",
             (artifact, now(), task_id),
         )
+
+
+def set_pane_target(conn, task_id, target: str) -> None:
+    """Record the tmux window.pane showing this task (display metadata only)."""
+    with immediate(conn) as c:
+        c.execute("UPDATE tasks SET pane_target=? WHERE id=?", (target, task_id))
+
+
+def all_tasks(conn) -> list[sqlite3.Row]:
+    """Every task in id order — the dashboard's read model."""
+    return conn.execute("SELECT * FROM tasks ORDER BY id").fetchall()
 
 
 def dep_artifacts(conn, task_id) -> dict[int, str]:
