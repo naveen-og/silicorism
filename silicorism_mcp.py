@@ -5,8 +5,9 @@ silicorism_plan_and_submit, silicorism_get_status, silicorism_start_workers,
 silicorism_gc. No dependency on the `mcp` package — the stdio transport is just
 newline-delimited JSON-RPC, so a few dozen lines of stdlib cover it.
 
-Register with Claude Code:  claude mcp add silicorism -- python silicorism_mcp.py
-DB resolves from SILICORISM_DB or the CWD-relative default (see cli.default_db).
+Register with Claude Code:  claude mcp add silicorism -- silicorism-mcp
+DB resolves from SILICORISM_DB or the per-repo default (see cli.default_db):
+the git root's .git/silicorism.db, else ~/.config/silicorism/repos/<slug>/.
 """
 
 from __future__ import annotations

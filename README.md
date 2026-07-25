@@ -66,11 +66,25 @@ auto-starts native-pane workers** in one call. Pass `prompt` for the default
 plus each failed task's artifact + last error; `silicorism_verify_and_continue`
 lets the orchestrator resubmit a corrective DAG and re-run until satisfied.
 
-Default per-role models are the **opencode free tier** (unlimited, `thinking:high`):
-scout `opencode/deepseek-v4-flash-free`, builder `opencode/nemotron-3-ultra-free`,
-fixer `opencode/hy3-free` — all overridable per node. Nodes may use friendly names
-(`deepseek-v4-flash`, `nemotron-3-ultra`, `hy3`, `mimo-2.5`, `north-mini-code`) which
-resolve to the opencode free ids, or a full model id.
+Default per-role models are the **bedrock-mantle OSS trio** (`thinking:high`):
+scout `zai.glm-5`, builder `qwen.qwen3-coder-480b-a35b-instruct`, fixer
+`moonshotai.kimi-k2.5` — all overridable per node. Friendly names
+(`qwen3-coder-480b`, `kimi-k2.5`, `glm-5`, `deepseek-v4-flash`, `nemotron-3-ultra`,
+`hy3`, `mimo-2.5`, `north-mini-code`) resolve to full ids; full ids pass through.
+
+**Live TUI panes.** `pi` tasks run the full interactive pi TUI in their tmux pane
+(`extensions/autoexit.ts` exits pi when the agent settles, writes the clean final
+answer to `$SILICORISM_ARTIFACT`, and the sentinel captures the exit code). Attach
+with `tmux attach -t silicorism-session` to watch agents work in parallel.
+
+**Retry escalation.** A failed `pi` task requeues on the next stronger model:
+qwen3-coder-480b → kimi-k2.5 → glm-5, then fails for the orchestrator to handle.
+
+**Verify gate + merge.** The 5-task pipeline is now 6: a deterministic `verify`
+node re-runs the test command after the fixer — cleanup is unreachable unless it
+exits 0. `build_pipeline(..., merge=True)` adds a `worktree_merge` node that
+commits worktree changes and `--no-ff` merges the branch into base; conflicts
+fail the task and quarantine the worktree.
 
 ## Concurrency model
 - Every state write goes through `db.immediate()` = `BEGIN IMMEDIATE` + exponential

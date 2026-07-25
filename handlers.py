@@ -20,11 +20,19 @@ WORKTREE_ROOT = "/tmp/worktrees"
 # Task types that run as native CLI agents in a live tmux pane (SILICORISM_NATIVE).
 NATIVE_AGENTS = ("pi", "claude")
 
-DEFAULT_PI_MODEL = "opencode/deepseek-v4-flash-free"
+DEFAULT_PI_MODEL = "bedrock-mantle/qwen.qwen3-coder-480b-a35b-instruct"
 
-# Friendly canonical name -> opencode free-tier id, so DAG nodes can say
-# "nemotron-3-ultra" and get the unlimited free model. Full ids pass through.
+# autoexit.ts: lets a worker pane run the full pi TUI and still yield a
+# deterministic exit code + artifact file (see extensions/autoexit.ts).
+AUTOEXIT_EXT = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "extensions", "autoexit.ts")
+
+# Friendly canonical name -> full model id, so DAG nodes can say "glm-5".
+# Full ids pass through untouched.
 MODEL_ALIASES = {
+    "qwen3-coder-480b": "bedrock-mantle/qwen.qwen3-coder-480b-a35b-instruct",
+    "kimi-k2.5": "bedrock-mantle/moonshotai.kimi-k2.5",
+    "glm-5": "bedrock-mantle/zai.glm-5",
     "deepseek-v4-flash": "opencode/deepseek-v4-flash-free",
     "nemotron-3-ultra": "opencode/nemotron-3-ultra-free",
     "hy3": "opencode/hy3-free",
@@ -32,6 +40,39 @@ MODEL_ALIASES = {
     "mimo-v2.5": "opencode/mimo-v2.5-free",
     "north-mini-code": "opencode/north-mini-code-free",
 }
+
+# Retry escalation: each failed attempt bumps a pi task to the next stronger
+# model. Terminal rung = claude opus (orchestrator-grade) for the last retry.
+ESCALATION = [
+    "bedrock-mantle/qwen.qwen3-coder-480b-a35b-instruct",
+    "bedrock-mantle/moonshotai.kimi-k2.5",
+    "bedrock-mantle/zai.glm-5",
+]
+
+
+def escalate_payload(task_type: str, payload: str) -> str | None:
+    """Next-rung payload for a retried pi task, or None if nothing to change.
+
+    Unknown/strongest model -> first rung not already used. Non-pi tasks and
+    unparseable payloads are left alone.
+    """
+    if task_type != "pi":
+        return None
+    try:
+        data = json.loads(payload)
+        if not isinstance(data, dict):
+            return None
+    except (json.JSONDecodeError, ValueError, TypeError):
+        return None
+    current = resolve_model(data.get("model")) or DEFAULT_PI_MODEL
+    try:
+        nxt = ESCALATION[ESCALATION.index(current) + 1]
+    except ValueError:  # not on the ladder: start it
+        nxt = ESCALATION[0] if current != ESCALATION[0] else ESCALATION[1]
+    except IndexError:  # already at the top rung
+        return None
+    data["model"] = nxt
+    return json.dumps(data)
 
 
 def resolve_model(model: str | None) -> str | None:
@@ -142,7 +183,12 @@ def native_command(task_type: str, payload: str, context=None,
                    f"export SILICORISM_SELF={shlex.quote(agent_id)}; "
                    f"silicorism-msg(){{ python {shlex.quote(cli_path)} msg \"$@\"; }}; ")
     if task_type == "pi":
-        parts = ["pi", "-p", "--model", resolve_model(data.get("model")) or DEFAULT_PI_MODEL]
+        # Full interactive TUI in the pane; autoexit.ts ends the process when
+        # the agent settles and writes the clean artifact to $SILICORISM_ARTIFACT.
+        if data.get("artifact"):
+            prelude += f"export SILICORISM_ARTIFACT={shlex.quote(data['artifact'])}; "
+        parts = ["pi", "-e", AUTOEXIT_EXT, "--no-session",
+                 "--model", resolve_model(data.get("model")) or DEFAULT_PI_MODEL]
         if data.get("thinking"):
             parts += ["--thinking", data["thinking"]]
         parts.append(prompt)
@@ -157,7 +203,7 @@ def native_command(task_type: str, payload: str, context=None,
 def run_pi_agent(payload: str, context=None) -> str:
     """pi --model <model> [--thinking <thinking>] "<prompt>" (cwd optional)."""
     data = _parse(payload)
-    cmd = ["pi", "--model", resolve_model(data.get("model")) or DEFAULT_PI_MODEL]
+    cmd = ["pi", "-p", "--model", resolve_model(data.get("model")) or DEFAULT_PI_MODEL]
     if data.get("thinking"):
         cmd += ["--thinking", data["thinking"]]
     cmd.append(_prompt(data, context))
@@ -222,6 +268,44 @@ def worktree_cleanup(payload: str, context=None) -> str:
         _git(["branch", "-D", data["branch"]])  # best-effort; ok if absent
     _wt_state(data.get("db"), path, "cleaned", branch=data.get("branch"))
     return f"removed {path}"
+
+
+def worktree_merge(payload: str, context=None) -> str:
+    """Commit worktree changes, then merge the branch into base in the main repo.
+
+    Payload: {worktree_path, branch, base?}. Conflict/dirty-base -> raise, so
+    the task fails and the worktree stays quarantined for human review.
+    """
+    data = _parse(payload, required=("worktree_path", "branch"))
+    path, branch = data["worktree_path"], data["branch"]
+    base = data.get("base") or "main"
+    # Agents often leave work uncommitted; commit it so the merge sees it.
+    _git(["add", "-A"], cwd=path)
+    _git(["commit", "-m", f"silicorism: {branch}"], cwd=path)  # noop if clean
+    sw = _git(["switch", base])
+    if sw.returncode != 0:
+        raise RuntimeError(f"switch {base}: {sw.stderr.strip()[:300]}")
+    mg = _git(["merge", "--no-ff", "-m", f"silicorism: merge {branch}", branch])
+    if mg.returncode != 0:
+        _git(["merge", "--abort"])
+        _wt_state(data.get("db"), path, "quarantined", branch=branch)
+        raise RuntimeError(f"merge conflict: {mg.stdout.strip()[:300]}")
+    return f"merged {branch} into {base}"
+
+
+def verify(payload: str, context=None) -> str:
+    """Deterministic gate: run the test command; non-zero exit fails the task.
+
+    Agents can claim success — this node cannot. Payload: {test_command, cwd}.
+    """
+    data = _parse(payload, required=("test_command", "cwd"))
+    proc = subprocess.run(data["test_command"], shell=True, capture_output=True,
+                          text=True, cwd=data["cwd"], timeout=600)
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"verify failed (exit {proc.returncode}): "
+            f"{(proc.stdout + proc.stderr).strip()[:500]}")
+    return f"verify passed: {data['test_command']}"
 
 
 def _agent_payload(prompt, model, thinking, cwd) -> str:
@@ -311,6 +395,8 @@ HANDLERS = {
     "claude": run_claude_agent,
     "worktree_create": worktree_create,
     "worktree_cleanup": worktree_cleanup,
+    "worktree_merge": worktree_merge,
+    "verify": verify,
     "fixer_loop": fixer_loop,
 }
 
@@ -335,4 +421,25 @@ if __name__ == "__main__":
             pass
         else:
             raise AssertionError(f"{bad} should have raised")
+    # verify gate: exit 0 passes, non-zero raises
+    assert "passed" in verify(json.dumps({"test_command": "true", "cwd": "/tmp"}))
+    try:
+        verify(json.dumps({"test_command": "false", "cwd": "/tmp"}))
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("failing verify must raise")
+    # escalation ladder: qwen -> kimi -> glm -> None; non-pi untouched
+    p1 = escalate_payload("pi", json.dumps({"prompt": "x", "model": "qwen3-coder-480b"}))
+    assert json.loads(p1)["model"] == "bedrock-mantle/moonshotai.kimi-k2.5"
+    p2 = escalate_payload("pi", p1)
+    assert json.loads(p2)["model"] == "bedrock-mantle/zai.glm-5"
+    assert escalate_payload("pi", p2) is None
+    assert escalate_payload("shell", "echo hi") is None
+    # native pi command: full TUI (no -p) + autoexit extension + artifact env
+    cmd = native_command("pi", json.dumps(
+        {"prompt": "go", "model": "glm-5", "artifact": "/tmp/a.txt"}))
+    assert "autoexit.ts" in cmd and " -p " not in cmd, cmd
+    assert "SILICORISM_ARTIFACT=/tmp/a.txt" in cmd, cmd
+    assert "bedrock-mantle/zai.glm-5" in cmd, cmd
     print(json.dumps({"ok": True, "handlers": list(HANDLERS)}))

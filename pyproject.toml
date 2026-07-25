@@ -12,9 +12,12 @@ dependencies = []
 
 [project.scripts]
 silicorism = "cli:main"
+silicorism-mcp = "silicorism_mcp:main"
+silicorism-msg = "cli:msg_main"
 
 [tool.setuptools]
 # Flat single-file modules — no package dir. `pip install -e .` / pipx expose
-# the `silicorism` entry point globally; it resolves its DB relative to CWD.
+# the console entry points globally; each resolves its DB per-repo (git root's
+# .git/silicorism.db, else ~/.config/silicorism/repos/<slug>/), never from CWD.
 py-modules = ["cli", "db", "handlers", "worker", "silicorism_tools",
               "tmux_orchestrator", "skills", "silicorism_mcp"]

@@ -256,6 +256,47 @@ def cmd_msg(args) -> None:
         conn.close()
 
 
+def cmd_mcp(args) -> None:
+    """Run the MCP stdio server (JSON-RPC over stdin/stdout).
+
+    Register globally with:  claude mcp add silicorism -- silicorism mcp
+    """
+    import silicorism_mcp  # lazy: silicorism_mcp imports cli, avoid a cycle
+    silicorism_mcp.main()
+
+
+def cmd_install_extension(args) -> None:
+    """Symlink extensions/silicorism.ts into ~/.pi/extensions so `pi` loads it."""
+    src = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                       "extensions", "silicorism.ts")
+    if not os.path.exists(src):
+        raise SystemExit(f"install-extension: source not found: {src}")
+    dst_dir = os.path.expanduser("~/.pi/extensions")
+    os.makedirs(dst_dir, exist_ok=True)
+    dst = os.path.join(dst_dir, "silicorism.ts")
+    if os.path.lexists(dst):
+        if not args.force:
+            raise SystemExit(f"install-extension: {dst} exists; use --force to replace")
+        os.remove(dst)
+    os.symlink(src, dst)
+    print(f"linked {dst} -> {src}")
+
+
+def msg_main() -> None:
+    """Standalone `silicorism-msg` console entrypoint: P2P send/poll.
+
+    Same surface as `silicorism msg`; installed as its own script so native
+    agents can call `silicorism-msg send/poll` from PATH without a shell wrapper.
+    """
+    p = argparse.ArgumentParser(prog="silicorism-msg")
+    p.add_argument("action", choices=("send", "poll"))
+    p.add_argument("target", nargs="?")
+    p.add_argument("text", nargs="?")
+    p.add_argument("--db")
+    p.add_argument("--self", dest="self_id")
+    cmd_msg(p.parse_args())
+
+
 def cmd_verify(args) -> None:
     """Check that required binaries are reachable on PATH."""
     print(f"{'binary':<10} {'status':<9} path")
@@ -336,6 +377,13 @@ def main() -> None:
 
     sub.add_parser("verify", help="check pi/claude/git/python3 on PATH").set_defaults(
         fn=cmd_verify)
+
+    sub.add_parser("mcp", help="run the MCP stdio server").set_defaults(fn=cmd_mcp)
+
+    ie = sub.add_parser("install-extension",
+                        help="symlink extensions/silicorism.ts into ~/.pi/extensions")
+    ie.add_argument("--force", action="store_true", help="replace an existing file/link")
+    ie.set_defaults(fn=cmd_install_extension)
 
     sv = with_db(sub.add_parser("supervise", help="tmux session: orchestrator + dashboard"))
     sv.add_argument("--agent", choices=("pi", "claude"), default="pi")

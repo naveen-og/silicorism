@@ -36,7 +36,7 @@ def test_pi_full_payload(run):
     assert out == "done"
     # friendly name resolves to the opencode free id
     assert run.call_args.args[0] == [
-        "pi", "--model", "opencode/hy3-free", "--thinking", "max", "hi"]
+        "pi", "-p", "--model", "opencode/hy3-free", "--thinking", "max", "hi"]
     assert run.call_args.kwargs["cwd"] == "/work"
 
 
@@ -44,7 +44,7 @@ def test_pi_full_payload(run):
 def test_pi_defaults(run):
     run.return_value = _proc()
     handlers.run("pi", json.dumps({"prompt": "go"}))
-    assert run.call_args.args[0] == ["pi", "--model", "opencode/deepseek-v4-flash-free","go"]
+    assert run.call_args.args[0] == ["pi", "-p", "--model", handlers.DEFAULT_PI_MODEL, "go"]
     assert run.call_args.kwargs["cwd"] is None
 
 
@@ -52,7 +52,7 @@ def test_pi_defaults(run):
 def test_pi_fallback_string(run):
     run.return_value = _proc()
     handlers.run("pi", "just a prompt")
-    assert run.call_args.args[0] == ["pi", "--model", "opencode/deepseek-v4-flash-free","just a prompt"]
+    assert run.call_args.args[0] == ["pi", "-p", "--model", handlers.DEFAULT_PI_MODEL, "just a prompt"]
 
 
 @patch("handlers.subprocess.run")

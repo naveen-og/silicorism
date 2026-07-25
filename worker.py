@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 import signal
 import time
 
@@ -36,6 +37,25 @@ def _task_cwd(task) -> str:
         return "."
 
 
+def _artifact_path(task_id) -> str:
+    """Clean-text artifact written by autoexit.ts (TUI logs are ANSI soup)."""
+    return tmux.log_path(task_id) + ".artifact"
+
+
+def _native_payload(task) -> str:
+    """Task payload with the artifact path injected for pi TUI runs."""
+    if task["task_type"] != "pi":
+        return task["payload"]
+    try:
+        data = json.loads(task["payload"] or "{}")
+        if not isinstance(data, dict):
+            return task["payload"]
+    except (json.JSONDecodeError, ValueError):
+        return task["payload"]
+    data["artifact"] = _artifact_path(task["id"])
+    return json.dumps(data)
+
+
 def _run_native(conn, task, agent_id, command: str) -> None:
     """Execute an agent live in a tmux pane; raise on non-zero/absent exit."""
     tid = task["id"]
@@ -49,8 +69,10 @@ def _run_native(conn, task, agent_id, command: str) -> None:
     code = tmux.wait_for_exit(sentinel, stop=lambda: _STOP)
     if code != 0:
         raise RuntimeError(f"native agent exit {code if code is not None else 'timeout'}")
-    # Rich artifact = the agent's actual output, so downstream deps get context.
-    artifact = tmux.read_log_tail(logf) or f"native pane {win} exit 0"
+    # Prefer the clean autoexit artifact; fall back to the raw log tail.
+    artifact = (tmux.read_log_tail(_artifact_path(tid), max_chars=4000)
+                or tmux.read_log_tail(logf)
+                or f"native pane {win} exit 0")
     db.complete_task(conn, tid, artifact=artifact)
     db.log(conn, tid, agent_id, f"completed (native): {win}")
     tmux.mark_done(tid, failed=False)
@@ -60,7 +82,7 @@ def _open_task_window(db_path, task) -> None:
     """Under SILICORISM_TMUX (in-process mode), tail the task's logs in a window."""
     if not _TMUX:
         return
-    cmd = f"python cli.py logs --db {db_path} --task {task['id']} --follow"
+    cmd = f"silicorism logs --db {shlex.quote(db_path)} --task {task['id']} --follow"
     try:
         tmux.ensure_session()
         tmux.task_window(task["id"], _task_cwd(task), cmd)
@@ -104,7 +126,7 @@ def run_worker(db_path: str, agent_id: str, *, idle_sleep: float = 0.1,
             context = db.dep_artifacts(conn, tid)
             # SILICORISM_NATIVE: pi/claude tasks run as live CLI processes in a pane.
             native_cmd = (handlers.native_command(
-                task["task_type"], task["payload"], context, cli_path=_CLI)
+                task["task_type"], _native_payload(task), context, cli_path=_CLI)
                 if _NATIVE else None)
             if native_cmd is None:
                 _open_task_window(db_path, task)
@@ -120,6 +142,13 @@ def run_worker(db_path: str, agent_id: str, *, idle_sleep: float = 0.1,
                 status = db.fail_task(conn, tid)
                 db.log(conn, tid, agent_id, f"error: {err}",
                        level="error", metadata=f"requeued={status=='pending'}")
+                if status == "pending":
+                    # Model escalation ladder: retry on the next stronger model.
+                    stronger = handlers.escalate_payload(
+                        task["task_type"], task["payload"])
+                    if stronger:
+                        db.set_payload(conn, tid, stronger)
+                        db.log(conn, tid, agent_id, "escalated model for retry")
                 if native_cmd is not None:
                     try:
                         tmux.mark_done(tid, failed=True)

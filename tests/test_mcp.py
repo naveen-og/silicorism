@@ -52,13 +52,14 @@ def test_tools_call_plan_and_get_status(tmp_path):
     assert r["result"]["isError"] is False
     payload = json.loads(r["result"]["content"][0]["text"])
     assert payload["mode"] == "pipeline"
-    assert list(payload["tasks"]) == ["worktree", "scout", "builder", "fixer", "cleanup"]
-    # get_status reflects the 5 queued tasks + a not-yet-satisfied verdict
+    assert list(payload["tasks"]) == ["worktree", "scout", "builder", "fixer",
+                                      "verify", "cleanup"]
+    # get_status reflects the 6 queued tasks + a not-yet-satisfied verdict
     r2 = mcp.handle({"jsonrpc": "2.0", "id": 4, "method": "tools/call",
                      "params": {"name": "silicorism_get_status",
                                 "arguments": {"db": dbp}}})
     status = json.loads(r2["result"]["content"][0]["text"])
-    assert status["tasks"]["pending"] == 5
+    assert status["tasks"]["pending"] == 6
     assert status["satisfied"] is False
 
 

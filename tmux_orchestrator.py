@@ -139,7 +139,7 @@ def supervisor_layout(db_path: str, *, agent: str = "pi", extension: str | None 
     # bottom pane: the polling dashboard.
     _tmux("split-window", "-v", "-t", win, "-c", ".")
     _tmux("send-keys", "-t", f"{win}.1",
-          f"python cli.py dashboard --db {shlex.quote(db_path)}", "Enter")
+          f"silicorism dashboard --db {shlex.quote(db_path)}", "Enter")
     # top pane: the orchestrator agent (pi/claude), optionally auto-started.
     if launch:
         if agent == "pi":
@@ -152,7 +152,7 @@ def supervisor_layout(db_path: str, *, agent: str = "pi", extension: str | None 
 def launch_dashboard(db_path: str, *, session: str = SESSION) -> None:
     """Run the polling dashboard inside window 0 of the session."""
     ensure_session(session)
-    cmd = f"python cli.py dashboard --db {shlex.quote(db_path)}"
+    cmd = f"silicorism dashboard --db {shlex.quote(db_path)}"
     _tmux("send-keys", "-t", _window_target(session, "dashboard"), cmd, "Enter")
 
 

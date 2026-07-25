@@ -348,6 +348,13 @@ def fail_task(conn, task_id) -> str:
     return result["status"]
 
 
+def set_payload(conn, task_id, payload: str) -> None:
+    """Rewrite a task's payload (used by the retry model-escalation ladder)."""
+    with immediate(conn) as c:
+        c.execute("UPDATE tasks SET payload=?, updated_at=? WHERE id=?",
+                  (payload, now(), task_id))
+
+
 def requeue_agent_tasks(conn, agent_id) -> None:
     """On shutdown, hand a crashing agent's in-flight work back to the queue."""
     with immediate(conn) as c:

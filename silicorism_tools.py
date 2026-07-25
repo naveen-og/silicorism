@@ -14,20 +14,24 @@ import handlers
 
 WORKTREE_ROOT = handlers.WORKTREE_ROOT
 
-# Default per-role models: opencode free tier (unlimited), all reasoning-capable.
+# Default per-role models: the OSS trio on bedrock-mantle, matched to role
+# strengths — glm-5 reasons (scout), qwen3-coder builds, kimi-k2.5 reviews/fixes.
 DEFAULT_MODELS = {
-    "scout": "opencode/deepseek-v4-flash-free",
-    "builder": "opencode/nemotron-3-ultra-free",
-    "fixer": "opencode/hy3-free",
+    "scout": "bedrock-mantle/zai.glm-5",
+    "builder": "bedrock-mantle/qwen.qwen3-coder-480b-a35b-instruct",
+    "fixer": "bedrock-mantle/moonshotai.kimi-k2.5",
 }
 DEFAULT_THINKING = "high"
 
 
 def build_pipeline(conn, db_path, name, prompt, *, base="main",
-                   test_command="pytest -q", max_attempts=3) -> dict:
-    """Insert the 5-task DAG (worktree->scout->builder->fixer->cleanup).
+                   test_command="pytest -q", max_attempts=3,
+                   merge=False) -> dict:
+    """Insert the DAG: worktree->scout->builder->fixer->verify[->merge]->cleanup.
 
-    Returns {"name","worktree_path","tasks":{worktree,scout,builder,fixer,cleanup}}.
+    `verify` re-runs the tests deterministically — cleanup is unreachable unless
+    they exit 0. `merge=True` adds a merge-back-to-base node after the gate.
+    Returns {"name","worktree_path","tasks":{...}}.
     """
     path = os.path.join(WORKTREE_ROOT, name)
     t1 = db.add_task(conn, "worktree_create",
@@ -49,13 +53,23 @@ def build_pipeline(conn, db_path, name, prompt, *, base="main",
         "cwd": path, "max_attempts": max_attempts, "db": db_path,
         "upstream": f"builder-{name}", "agent_id": f"fixer-{name}",
     }), depends_on=t3, worktree_path=path)
-    t5 = db.add_task(conn, "worktree_cleanup",
-                     json.dumps({"worktree_path": path, "branch": name,
-                                 "db": db_path}),
-                     depends_on=t4, worktree_path=path)
-    return {"name": name, "worktree_path": path,
-            "tasks": {"worktree": t1, "scout": t2, "builder": t3,
-                      "fixer": t4, "cleanup": t5}}
+    t5 = db.add_task(conn, "verify",
+                     json.dumps({"test_command": test_command, "cwd": path}),
+                     depends_on=t4, worktree_path=path, max_retries=0)
+    tasks = {"worktree": t1, "scout": t2, "builder": t3, "fixer": t4,
+             "verify": t5}
+    last = t5
+    if merge:
+        last = db.add_task(conn, "worktree_merge",
+                           json.dumps({"worktree_path": path, "branch": name,
+                                       "base": base, "db": db_path}),
+                           depends_on=last, worktree_path=path, max_retries=0)
+        tasks["merge"] = last
+    tasks["cleanup"] = db.add_task(
+        conn, "worktree_cleanup",
+        json.dumps({"worktree_path": path, "branch": name, "db": db_path}),
+        depends_on=last, worktree_path=path)
+    return {"name": name, "worktree_path": path, "tasks": tasks}
 
 
 def _toposort(nodes: list[dict]) -> list[str]:
@@ -88,7 +102,7 @@ def build_dag(conn, db_path, nodes, *, name=None, base="main", cwd=None) -> dict
 
     If `name` is given the DAG is wrapped in a git worktree (worktree_create ->
     nodes -> worktree_cleanup) and every node runs in it; otherwise nodes run in
-    `cwd` (default '.'). Returns {"nodes": {node_id: task_id}, ...}.
+    `cwd` (default: the current working directory). Returns {"nodes": {id: task_id}}.
     """
     if not nodes:
         raise ValueError("nodes must be a non-empty list")
@@ -103,7 +117,9 @@ def build_dag(conn, db_path, nodes, *, name=None, base="main", cwd=None) -> dict
     order = _toposort(nodes)  # also raises on cycles
     node_by_id = {n["id"]: n for n in nodes}
 
-    work_path = cwd or "."
+    # Absolute so tmux `-c <work_path>` opens panes in the target repo regardless
+    # of where the workers were spawned from; a literal "." is CWD-dependent.
+    work_path = cwd or os.getcwd()
     wt_task = None
     if name:
         work_path = os.path.join(WORKTREE_ROOT, name)
@@ -250,14 +266,20 @@ if __name__ == "__main__":
         db.init_db(dbp)
         conn = db.connect(dbp)
         p = build_pipeline(conn, dbp, "demo", "add auth")
-        assert list(p["tasks"]) == ["worktree", "scout", "builder", "fixer", "cleanup"]
-        assert p["tasks"]["cleanup"] == 5
-        # default models are the opencode free tier with high thinking
+        assert list(p["tasks"]) == ["worktree", "scout", "builder", "fixer",
+                                    "verify", "cleanup"]
+        assert p["tasks"]["cleanup"] == 6
+        # default models are the bedrock-mantle OSS trio with high thinking
         sp = json.loads(conn.execute("SELECT payload FROM tasks WHERE id=?",
                                      (p["tasks"]["builder"],)).fetchone()["payload"])
-        assert sp["model"] == "opencode/nemotron-3-ultra-free" and sp["thinking"] == "high"
+        assert sp["model"] == "bedrock-mantle/qwen.qwen3-coder-480b-a35b-instruct"
+        assert sp["thinking"] == "high"
+        # merge=True wires fixer->verify->merge->cleanup
+        pm = build_pipeline(conn, dbp, "demo2", "add auth", merge=True)
+        assert list(pm["tasks"]) == ["worktree", "scout", "builder", "fixer",
+                                     "verify", "merge", "cleanup"]
         st = get_status(conn)
-        assert st["tasks"]["pending"] == 5 and st["satisfied"] is False
+        assert st["tasks"]["pending"] == 13 and st["satisfied"] is False
         assert st["messages"] == [] and st["worktrees"] == []
         db.send_inter_agent_message(conn, "a", "b", "hi")
         assert get_status(conn)["messages"][0]["content"] == "hi"
