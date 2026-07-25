@@ -8,6 +8,7 @@ are unit-testable without a running server.
 from __future__ import annotations
 
 import os
+import re
 import shlex
 import subprocess
 import tempfile
@@ -121,6 +122,9 @@ RUNNING, DONE, FAILED = "RUNNING", "DONE", "FAILED"
 _MARKERS = (RUNNING, DONE, FAILED)
 # Pane border doubles as the label bar: "<agent-id> <status>".
 PANE_FORMAT = "#[align=left] #{pane_title} "
+# Exact grid window names only: "agents" or "agents-<N>" — never a user's own
+# "agents-notes" or similar, which would otherwise get agent panes spilled into it.
+_GRID_RE = re.compile(rf"^{re.escape(GRID_WINDOW)}(?:-(\d+))?$")
 
 
 def _grid_windows(session: str) -> list[str]:
@@ -128,8 +132,7 @@ def _grid_windows(session: str) -> list[str]:
     r = _tmux("list-windows", "-t", session, "-F", "#{window_name}")
     if r.returncode != 0:
         return []
-    return [n for n in r.stdout.split()
-            if n == GRID_WINDOW or n.startswith(GRID_WINDOW + "-")]
+    return [n for n in r.stdout.split() if _GRID_RE.match(n)]
 
 
 def _pane_count(session: str, window: str) -> int:
@@ -143,7 +146,12 @@ def _next_grid_window(session: str) -> tuple[str, bool]:
     for w in wins:
         if _pane_count(session, w) < GRID_MAX:
             return w, False
-    return (GRID_WINDOW if not wins else f"{GRID_WINDOW}-{len(wins) + 1}"), True
+    if not wins:
+        return GRID_WINDOW, True
+    # Next suffix is one past the highest existing spill number, not the
+    # window count — a closed agents-2 must not cause a duplicate agents-3.
+    nums = [int(m.group(1)) for w in wins if (m := _GRID_RE.match(w)) and m.group(1)]
+    return f"{GRID_WINDOW}-{max(nums, default=1) + 1}", True
 
 
 def grid_pane(task_id, label: str, cwd: str, command: str, sentinel: str, *,

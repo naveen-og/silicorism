@@ -126,3 +126,23 @@ def test_missing_pane_id_raises():
         except RuntimeError:
             return
     raise AssertionError("expected RuntimeError when tmux returns no pane id")
+
+
+def test_unrelated_agents_prefixed_window_is_not_reused():
+    """A user's own 'agents-notes' window (however empty) must never be
+    mistaken for a grid spill window."""
+    fake = FakeTmux(existing=["agents-notes"])
+    (window, _), = _place(fake, 1)
+    assert window == "agents"
+    split_targets = [f for f in fake.flat() if "split-window" in f]
+    assert not any("agents-notes" in f for f in split_targets), split_targets
+
+
+def test_next_spill_window_skips_gap_instead_of_colliding():
+    """agents and agents-3 exist (agents-2 was closed) and are both full;
+    the next spill must be agents-4, never a duplicate agents-3."""
+    fake = FakeTmux(existing=["agents", "agents-3"])
+    fake.panes["agents"] = [f"%{i}" for i in range(tmux.GRID_MAX)]
+    fake.panes["agents-3"] = [f"%{i + 100}" for i in range(tmux.GRID_MAX)]
+    (window, _), = _place(fake, 1)
+    assert window == "agents-4", window
