@@ -113,6 +113,86 @@ def run_task_in_pane(task_id, task_type: str, cwd: str, command: str,
     return name
 
 
+# --- agents grid ------------------------------------------------------------
+
+GRID_WINDOW = "agents"
+GRID_MAX = int(os.environ.get("SILICORISM_GRID_MAX") or 4)
+RUNNING, DONE, FAILED = "RUNNING", "DONE", "FAILED"
+_MARKERS = (RUNNING, DONE, FAILED)
+# Pane border doubles as the label bar: "<agent-id> <status>".
+PANE_FORMAT = "#[align=left] #{pane_title} "
+
+
+def _grid_windows(session: str) -> list[str]:
+    """Existing agents* window names, oldest first."""
+    r = _tmux("list-windows", "-t", session, "-F", "#{window_name}")
+    if r.returncode != 0:
+        return []
+    return [n for n in r.stdout.split()
+            if n == GRID_WINDOW or n.startswith(GRID_WINDOW + "-")]
+
+
+def _pane_count(session: str, window: str) -> int:
+    r = _tmux("list-panes", "-t", f"{session}:{window}", "-F", "#{pane_id}")
+    return len(r.stdout.split()) if r.returncode == 0 else 0
+
+
+def _next_grid_window(session: str) -> tuple[str, bool]:
+    """(window name, needs_creating) for the next agent pane."""
+    wins = _grid_windows(session)
+    for w in wins:
+        if _pane_count(session, w) < GRID_MAX:
+            return w, False
+    return (GRID_WINDOW if not wins else f"{GRID_WINDOW}-{len(wins) + 1}"), True
+
+
+def grid_pane(task_id, label: str, cwd: str, command: str, sentinel: str, *,
+              session: str = SESSION, logfile: str | None = None) -> tuple[str, str]:
+    """Run <command> in a tiled pane of a shared agents window.
+
+    Panes are capped at GRID_MAX per window so a pi TUI stays readable; the
+    overflow opens agents-2, agents-3, ... Returns (window, pane_id). The pane
+    id (%N) is stable for the pane's life, unlike the shifting w.i index.
+    Raises RuntimeError if tmux does not hand back a pane id.
+    """
+    if os.path.exists(sentinel):
+        os.remove(sentinel)
+    if logfile is None:
+        logfile = log_path(task_id)
+    ensure_session(session)
+    window, is_new = _next_grid_window(session)
+    if is_new:
+        r = _tmux("new-window", "-t", session, "-n", window, "-c", cwd,
+                  "-P", "-F", "#{pane_id}")
+    else:
+        r = _tmux("split-window", "-t", f"{session}:{window}", "-c", cwd,
+                  "-P", "-F", "#{pane_id}")
+    pane = r.stdout.strip()
+    if r.returncode != 0 or not pane:
+        raise RuntimeError(f"tmux pane: {r.stderr.strip()[:200] or 'no pane id'}")
+    target = f"{session}:{window}"
+    _tmux("set-option", "-w", "-t", target, "pane-border-status", "top")
+    _tmux("set-option", "-w", "-t", target, "pane-border-format", PANE_FORMAT)
+    _tmux("set-option", "-p", "-t", pane, "remain-on-exit", "on")
+    _tmux("select-pane", "-t", pane, "-T", f"{label} {RUNNING}")
+    _tmux("select-layout", "-t", target, "tiled")
+    tmp = shlex.quote(sentinel + ".tmp")
+    fin = shlex.quote(sentinel)
+    log = shlex.quote(logfile)
+    wrapped = f"{{ {command}; echo $? > {tmp}; }} 2>&1 | tee {log}; mv {tmp} {fin}"
+    _tmux("send-keys", "-t", pane, wrapped, "Enter")
+    return window, pane
+
+
+def mark_pane_done(pane_id: str, *, failed: bool = False) -> None:
+    """Swap a pane's status marker to DONE/FAILED, keeping its label."""
+    r = _tmux("display-message", "-p", "-t", pane_id, "#{pane_title}")
+    title = r.stdout.strip() if r.returncode == 0 else ""
+    base = title.rsplit(" ", 1)[0] if title.endswith(_MARKERS) else title
+    _tmux("select-pane", "-t", pane_id, "-T",
+          f"{base} {FAILED if failed else DONE}".strip())
+
+
 def wait_for_exit(sentinel: str, *, timeout: float = 3600.0, poll: float = 0.5,
                   stop=None) -> int | None:
     """Poll a sentinel file for the task's exit code. None on timeout/stop."""
