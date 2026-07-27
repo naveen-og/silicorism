@@ -165,7 +165,32 @@ def test_worker_falls_back_to_a_window_when_the_grid_fails(tmp_path):
         window, pane = worker._place_pane(conn, task, "pi 'go'", "/tmp/s", "/tmp/l")
 
     assert pane is None and window == "task-1-pi"
-    assert legacy.called
+    assert legacy.call_count == 1
+    stored = conn.execute("SELECT pane_target FROM tasks WHERE id=?",
+                          (tid,)).fetchone()["pane_target"]
+    assert stored is None
+    conn.close()
+
+
+def test_a_failed_pane_target_write_does_not_launch_a_second_agent(tmp_path):
+    """The agent is already live once grid_pane returns — never re-launch it."""
+    import db
+    import worker
+
+    dbp = str(tmp_path / "w3.db")
+    db.init_db(dbp)
+    conn = db.connect(dbp)
+    tid = db.add_task(conn, "pi", "{}")
+    task = conn.execute("SELECT * FROM tasks WHERE id=?", (tid,)).fetchone()
+
+    with patch.object(worker.tmux, "grid_pane", return_value=("agents", "%3")), \
+         patch.object(worker.db, "set_pane_target",
+                      side_effect=RuntimeError("database is locked")), \
+         patch.object(worker.tmux, "run_task_in_pane") as legacy:
+        window, pane = worker._place_pane(conn, task, "pi 'go'", "/tmp/s", "/tmp/l")
+
+    assert (window, pane) == ("agents", "%3")
+    assert not legacy.called
     conn.close()
 
 
@@ -179,10 +204,12 @@ def test_worker_records_the_pane_target(tmp_path):
     tid = db.add_task(conn, "pi", '{"agent_id": "builder-x"}')
     task = conn.execute("SELECT * FROM tasks WHERE id=?", (tid,)).fetchone()
 
-    with patch.object(worker.tmux, "grid_pane", return_value=("agents", "%7")):
+    with patch.object(worker.tmux, "grid_pane", return_value=("agents", "%7")) as g:
         worker._place_pane(conn, task, "pi 'go'", "/tmp/s", "/tmp/l")
 
     stored = conn.execute("SELECT pane_target FROM tasks WHERE id=?",
                           (tid,)).fetchone()["pane_target"]
     assert stored == "agents.%7"
+    # the pane's label is the agent id, so the grid reads as a roster of agents
+    assert g.call_args[0][1] == "builder-x"
     conn.close()

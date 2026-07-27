@@ -62,7 +62,7 @@ def _pane_label(task) -> str:
         data = json.loads(task["payload"] or "{}")
         if isinstance(data, dict) and data.get("agent_id"):
             return str(data["agent_id"])
-    except (json.JSONDecodeError, ValueError):
+    except (json.JSONDecodeError, ValueError, TypeError):
         pass
     return f"{task['task_type']}-{task['id']}"
 
@@ -77,12 +77,17 @@ def _place_pane(conn, task, command: str, sentinel: str, logfile: str):
     try:
         window, pane = tmux.grid_pane(tid, _pane_label(task), cwd, command,
                                       sentinel, logfile=logfile)
-        db.set_pane_target(conn, tid, f"{window}.{pane}")
-        return window, pane
     except Exception:  # noqa: BLE001 - the grid is a viewport, never a dependency
         window = tmux.run_task_in_pane(tid, task["task_type"], cwd, command,
                                        sentinel, logfile=logfile)
         return window, None
+    # Recorded only after the launch succeeded: a failed write here must not
+    # re-enter the fallback, which would start a second agent for one task.
+    try:
+        db.set_pane_target(conn, tid, f"{window}.{pane}")
+    except Exception:  # noqa: BLE001 - display metadata, not a dependency
+        pass
+    return window, pane
 
 
 def _mark_pane(task_id, pane, *, failed: bool) -> None:
@@ -103,21 +108,22 @@ def _run_native(conn, task, agent_id, command: str) -> None:
     logf = tmux.log_path(tid)
     tmux.ensure_session()
     win, pane = _place_pane(conn, task, command, sentinel, logf)
-    db.log(conn, tid, agent_id, f"native pane {win}{'.' + pane if pane else ''}")
+    # Covers the whole body, so no error route leaves the pane titled RUNNING.
     try:
+        db.log(conn, tid, agent_id, f"native pane {win}{'.' + pane if pane else ''}")
         code = tmux.wait_for_exit(sentinel, stop=lambda: _STOP)
         if code != 0:
             raise RuntimeError(
                 f"native agent exit {code if code is not None else 'timeout'}")
+        # Prefer the clean autoexit artifact; fall back to the raw log tail.
+        artifact = (tmux.read_log_tail(_artifact_path(tid), max_chars=4000)
+                    or tmux.read_log_tail(logf)
+                    or f"native pane {win} exit 0")
+        db.complete_task(conn, tid, artifact=artifact)
+        db.log(conn, tid, agent_id, f"completed (native): {win}")
     except Exception:
         _mark_pane(tid, pane, failed=True)
         raise
-    # Prefer the clean autoexit artifact; fall back to the raw log tail.
-    artifact = (tmux.read_log_tail(_artifact_path(tid), max_chars=4000)
-                or tmux.read_log_tail(logf)
-                or f"native pane {win} exit 0")
-    db.complete_task(conn, tid, artifact=artifact)
-    db.log(conn, tid, agent_id, f"completed (native): {win}")
     _mark_pane(tid, pane, failed=False)
 
 
