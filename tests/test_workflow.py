@@ -578,3 +578,50 @@ if __name__ == "__main__":
             else:
                 fn()
     print("test_workflow OK")
+
+
+def test_a_drain_worker_waits_while_work_is_still_in_flight(tmp_path):
+    """An empty poll means 'nothing claimable', not 'nothing left to do'.
+
+    A worker that exits while a long scout is running leaves its fan-out to be
+    executed serially by whoever is left.
+    """
+    import time
+
+    import worker
+
+    dbp = str(tmp_path / "drain.db")
+    db.init_db(dbp)
+    conn = db.connect(dbp)
+    parent = db.add_task(conn, "pi", "{}")
+    db.add_task(conn, "pi", "{}", depends_on=parent)
+    db.claim_task(conn, "other-agent")  # parent is processing, child blocked
+
+    with patch("signal.signal"):  # run_worker installs handlers; not in a thread
+        t = threading.Thread(
+            target=worker.run_worker, args=(dbp, "drainer"), daemon=True,
+            kwargs={"idle_sleep": 0.01, "max_idle_loops": 1})
+        t.start()
+        time.sleep(0.3)
+        alive_while_busy = t.is_alive()
+        worker._STOP = True  # end the loop without running a real agent
+        t.join(timeout=5)
+        worker._STOP = False
+
+    assert alive_while_busy, "worker exited while a task was still processing"
+    assert not t.is_alive()
+    conn.close()
+
+
+def test_a_drain_worker_exits_once_the_queue_is_empty(tmp_path):
+    import worker
+
+    dbp = str(tmp_path / "drain2.db")
+    db.init_db(dbp)
+    with patch("signal.signal"):
+        t = threading.Thread(
+            target=worker.run_worker, args=(dbp, "drainer"), daemon=True,
+            kwargs={"idle_sleep": 0.01, "max_idle_loops": 1})
+        t.start()
+        t.join(timeout=5)
+    assert not t.is_alive(), "drain worker hung on an empty queue"

@@ -164,7 +164,13 @@ def run_worker(db_path: str, agent_id: str, *, idle_sleep: float = 0.1,
                 db.heartbeat(conn, agent_id, "idle")
                 db.checkpoint(conn)  # idle-loop WAL maintenance
                 if max_idle_loops and idle_loops >= max_idle_loops:
-                    break
+                    # An empty poll only means "nothing claimable right now" —
+                    # a long scout blocks its dependents. Exiting here would
+                    # leave one worker to run a fan-out serially.
+                    c = db.counts(conn)
+                    if not c["pending"] and not c["processing"]:
+                        break
+                    idle_loops = 0
                 time.sleep(idle_sleep)
                 continue
 

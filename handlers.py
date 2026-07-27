@@ -307,17 +307,24 @@ def worktree_integrate(payload: str, context=None) -> str:
     """
     data = _parse(payload, required=("into", "from_worktree", "branch"))
     into, src, branch = data["into"], data["from_worktree"], data["branch"]
-    # Agents leave work uncommitted; commit the source so the merge can see it.
-    _git(["add", "-A"], cwd=src)
-    _git(["commit", "-m", f"silicorism: {branch}"], cwd=src)  # noop if clean
+    # Agents leave work uncommitted on BOTH sides; commit each tree first. Git
+    # refuses to merge into a dirty tree, and that refusal looks nothing like a
+    # conflict — it silently drops the source's whole slice.
+    for tree, label in ((src, branch), (into, "target")):
+        _git(["add", "-A"], cwd=tree)
+        _git(["commit", "-m", f"silicorism: {label}"], cwd=tree)  # noop if clean
     mg = _git(["merge", "--no-ff", "-m", f"silicorism: integrate {branch}",
                branch], cwd=into)
     if mg.returncode == 0:
-        return "clean"
+        # "already up to date" means the source branch had no work of its own.
+        return "clean (already up to date)" if "up to date" in mg.stdout else "clean"
     conflicted = _git(["diff", "--name-only", "--diff-filter=U"], cwd=into)
-    files = [f for f in conflicted.stdout.split() if f]
-    _wt_state(data.get("db"), into, "conflicted", branch=branch)
-    return "conflicts: " + ", ".join(files or ["unknown"])
+    files = [f for f in conflicted.stdout.splitlines() if f]
+    if not files:  # refused outright, not conflicted — nothing to hand an agent
+        raise RuntimeError(
+            f"merge refused: {(mg.stderr or mg.stdout).strip()[:300]}")
+    _wt_state(data.get("db"), into, "quarantined", branch=branch)
+    return "conflicts: " + ", ".join(files)
 
 
 def verify(payload: str, context=None) -> str:

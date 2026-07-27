@@ -73,3 +73,29 @@ def test_overlapping_changes_report_conflicts_and_leave_the_tree_conflicted(repo
 def test_missing_required_field_raises():
     with pytest.raises(ValueError):
         handlers.worktree_integrate(json.dumps({"into": "/tmp/x"}))
+
+
+def test_uncommitted_work_in_the_target_does_not_swallow_the_source(repo):
+    """Builders leave work uncommitted; git refuses to merge into a dirty tree."""
+    _, wt_a, wt_b = repo
+    (wt_a / "a.py").write_text("A\n")  # never committed
+    (wt_b / "b.py").write_text("B\n")
+
+    out = handlers.worktree_integrate(json.dumps(
+        {"into": str(wt_a), "from_worktree": str(wt_b), "branch": "feat-b"}))
+
+    assert out == "clean"
+    assert (wt_a / "b.py").read_text() == "B\n"  # b's slice actually landed
+    assert (wt_a / "a.py").read_text() == "A\n"  # a's own work survived
+
+
+def test_an_empty_source_branch_is_reported_not_silently_clean(repo):
+    _, wt_a, wt_b = repo
+    (wt_a / "a.py").write_text("A\n")
+    _git(["add", "-A"], wt_a)
+    _git(["commit", "-m", "a"], wt_a)
+
+    out = handlers.worktree_integrate(json.dumps(
+        {"into": str(wt_a), "from_worktree": str(wt_b), "branch": "feat-b"}))
+
+    assert out == "clean (already up to date)"
