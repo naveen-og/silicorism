@@ -507,6 +507,8 @@ def test_build_dag_rejects_cycle_and_bad_dep(tmp_path):
          {"id": "b", "prompt": "y", "depends_on": ["a"]}],           # cycle
         [{"id": "a", "prompt": "x", "depends_on": ["ghost"]}],       # unknown dep
         [{"id": "a", "prompt": "x", "harness": "bogus"}],            # bad harness
+        [{"id": "a", "harness": "verify"}],                          # gate, no tests
+        [{"id": "a", "harness": "pi"}],                              # agent, no prompt
     ):
         try:
             silicorism_tools.build_dag(conn, dbp, bad)
@@ -514,6 +516,25 @@ def test_build_dag_rejects_cycle_and_bad_dep(tmp_path):
             pass
         else:
             raise AssertionError(f"{bad} should have raised")
+    conn.close()
+
+
+def test_build_dag_takes_a_verify_gate_as_the_last_node(tmp_path):
+    """A plan-derived DAG is all agents; without this it can only self-report."""
+    import silicorism_tools
+    dbp = str(tmp_path / "gate.db")
+    db.init_db(dbp)
+    conn = db.connect(dbp)
+    out = silicorism_tools.build_dag(conn, dbp, [
+        {"id": "task-1", "prompt": "do the thing"},
+        {"id": "gate", "harness": "verify", "test_command": "pytest -q",
+         "depends_on": ["task-1"]},
+    ], cwd=str(tmp_path))
+    row = conn.execute("SELECT task_type, payload FROM tasks WHERE id=?",
+                       (out["nodes"]["gate"],)).fetchone()
+    assert row["task_type"] == "verify"  # handlers.verify, not an agent
+    payload = json.loads(row["payload"])
+    assert payload == {"test_command": "pytest -q", "cwd": str(tmp_path)}
     conn.close()
 
 

@@ -43,11 +43,17 @@ INSTRUCTIONS = (
     "node's model, harness, and thinking level. Bind discovered skills to the "
     "nodes that need them; superpowers skills run in YOUR context, not the "
     "execution nodes', which only resolve skills from silicorism_list_skills.\n"
-    "4. SUBMIT: call silicorism_plan_and_submit with `nodes` (a custom DAG) or "
-    "with `prompt` + `complexity` (simple | standard | complex). Size the tier to "
-    "the request: a small self-contained program is `simple` (ONE agent, no "
-    "worktree), not three. It auto-starts native tmux-pane workers. Tell the user "
-    "to watch with `tmux attach -t silicorism-session`.\n"
+    "4. SUBMIT: call silicorism_plan_and_submit. If you wrote a plan, pass "
+    "`nodes` — ONE node per plan task, in plan order, each depending on the "
+    "previous one, each prompt carrying that task's acceptance criteria and its "
+    "file-level scope verbatim. Do NOT hand the raw goal to a built-in tier "
+    "instead: that throws your plan away and makes a smaller model re-derive it. "
+    "End the chain with a `harness: \"verify\"` node holding the test command, so "
+    "the run cannot be declared done by an agent that only claims it is. Fall "
+    "back to `prompt` + `complexity` (simple | standard | complex) only when "
+    "there is no plan — a small self-contained program is `simple` (ONE agent, "
+    "no worktree), not three. Workers auto-start; tell the user to watch with "
+    "`tmux attach -t silicorism-session`.\n"
     "5. WAIT, DO NOT POLL: call silicorism_wait once. It blocks until the queue "
     "settles and returns the verdict. Polling silicorism_get_status in a loop "
     "burns a full turn per poll for no information. If it returns settled with "
@@ -224,7 +230,12 @@ TOOLS = [
                             "prompt": {"type": "string"},
                             "depends_on": {"type": "array", "items": {"type": "string"},
                                            "description": "ids of prerequisite nodes"},
-                            "harness": {"type": "string", "enum": ["pi", "claude"]},
+                            "harness": {"type": "string",
+                                        "enum": ["pi", "claude", "verify"],
+                                        "description": "'verify' makes this node a "
+                                        "test gate: give test_command, not prompt"},
+                            "test_command": {"type": "string",
+                                             "description": "harness=verify only"},
                             "model": {"type": "string",
                                       "description": "friendly name: qwen3-coder-480b "
                                       "(build), kimi-k2.5 (review/fix), glm-5 "
@@ -233,7 +244,7 @@ TOOLS = [
                                          "description": "off|minimal|low|medium|high|xhigh|max"},
                             "skills": {"type": "array", "items": {"type": "string"}},
                         },
-                        "required": ["id", "prompt"],
+                        "required": ["id"],  # a verify node carries test_command
                     },
                 },
                 "prompt": {"type": "string",

@@ -244,6 +244,9 @@ def build_dag(conn, db_path, nodes, *, name=None, base="main", cwd=None) -> dict
         {id, prompt, depends_on?, harness?("pi"|"claude"), model?, thinking?,
          skills?, p2p?}
 
+    A node with harness "verify" is a test gate instead of an agent: it takes
+    `test_command` in place of `prompt` and fails the DAG when the tests do.
+
     If `name` is given the DAG is wrapped in a git worktree (worktree_create ->
     nodes -> worktree_cleanup) and every node runs in it; otherwise nodes run in
     `cwd` (default: the current working directory). Returns {"nodes": {id: task_id}}.
@@ -275,16 +278,26 @@ def build_dag(conn, db_path, nodes, *, name=None, base="main", cwd=None) -> dict
     for nid in order:
         n = node_by_id[nid]
         harness = n.get("harness") or "pi"
-        if harness not in ("pi", "claude"):
-            raise ValueError(f"node {nid!r}: harness must be 'pi' or 'claude'")
+        if harness not in ("pi", "claude", "verify"):
+            raise ValueError(
+                f"node {nid!r}: harness must be 'pi', 'claude' or 'verify'")
         deps = [id_map[d] for d in (n.get("depends_on") or [])]
         if wt_task and not deps:
             deps = [wt_task]  # root nodes wait for the worktree to exist
-        payload = {"prompt": n["prompt"], "cwd": work_path,
-                   "p2p": n.get("p2p", True), "agent_id": nid, "db": db_path}
-        for key in ("model", "thinking", "skills"):
-            if n.get(key):
-                payload[key] = n[key]
+        if harness == "verify":
+            # The gate a plan-derived DAG would otherwise lack: an agent can
+            # claim its task is done, this node runs the tests and cannot.
+            if not n.get("test_command"):
+                raise ValueError(f"node {nid!r}: verify needs a test_command")
+            payload = {"test_command": n["test_command"], "cwd": work_path}
+        else:
+            if not n.get("prompt"):
+                raise ValueError(f"node {nid!r}: {harness} node needs a prompt")
+            payload = {"prompt": n["prompt"], "cwd": work_path,
+                       "p2p": n.get("p2p", True), "agent_id": nid, "db": db_path}
+            for key in ("model", "thinking", "skills"):
+                if n.get(key):
+                    payload[key] = n[key]
         id_map[nid] = db.add_task(conn, harness, json.dumps(payload),
                                   depends_on=deps or None, worktree_path=work_path)
 
