@@ -7,6 +7,7 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -99,3 +100,31 @@ def test_an_empty_source_branch_is_reported_not_silently_clean(repo):
         {"into": str(wt_a), "from_worktree": str(wt_b), "branch": "feat-b"}))
 
     assert out == "clean (already up to date)"
+
+
+def test_cleanup_commits_the_work_and_keeps_an_unmerged_branch(tmp_path):
+    """The worktree is removed with --force; the branch is the only copy left."""
+    root = tmp_path / "repo"
+    root.mkdir()
+    _git(["init", "-b", "main"], root)
+    _git(["config", "user.email", "t@t"], root)
+    _git(["config", "user.name", "t"], root)
+    (root / "base.txt").write_text("base\n")
+    _git(["add", "-A"], root)
+    _git(["commit", "-m", "init"], root)
+    wt = tmp_path / "wt"
+    _git(["worktree", "add", "-b", "feat-x", str(wt), "main"], root)
+    _git(["config", "user.email", "t@t"], wt)
+    _git(["config", "user.name", "t"], wt)
+    (wt / "work.py").write_text("the whole point of the run\n")  # never committed
+
+    with patch.object(handlers, "_git",
+                      lambda args, cwd=None: _git(args, cwd or root)):
+        out = handlers.worktree_cleanup(json.dumps(
+            {"worktree_path": str(wt), "branch": "feat-x"}))
+
+    assert "kept branch feat-x" in out
+    assert not wt.exists()
+    # the agent's work survived the cleanup, on the branch
+    show = _git(["show", "feat-x:work.py"], root)
+    assert show.stdout == "the whole point of the run\n", show.stderr

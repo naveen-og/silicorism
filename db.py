@@ -12,7 +12,7 @@ import random
 import sqlite3
 import time
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 STATUSES = ("pending", "processing", "completed", "failed")
@@ -412,6 +412,27 @@ def requeue_agent_tasks(conn, agent_id) -> None:
             "WHERE status='processing' AND agent_id=?",
             (now(), agent_id),
         )
+
+
+def reap_stale(conn, *, older_than_s: float = 300.0) -> int:
+    """Requeue tasks whose worker died without requeuing them. Returns the count.
+
+    A worker killed with SIGKILL (pane closed, reboot) never reaches its
+    `finally`, so its task sits in `processing` for ever and every dependent
+    waits behind it. Only tasks whose agent has stopped heartbeating for
+    `older_than_s` are touched — a live agent must never have its work
+    handed to someone else.
+    """
+    # Same format as now(), so the string comparison is a time comparison.
+    cutoff = (datetime.now(timezone.utc) - timedelta(seconds=older_than_s)
+              ).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+    with immediate(conn) as c:
+        cur = c.execute(
+            "UPDATE tasks SET status='pending', agent_id=NULL, updated_at=? "
+            "WHERE status='processing' AND agent_id IN ("
+            "  SELECT agent_id FROM agent_heartbeats WHERE last_seen < ?)",
+            (now(), cutoff))
+    return cur.rowcount
 
 
 # --- observability ----------------------------------------------------------

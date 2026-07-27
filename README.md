@@ -140,6 +140,10 @@ fail the task and quarantine the worktree.
   worker to run a fan-out serially.
 - Pane placement is serialised with a lock file: four workers racing to open the
   grid would otherwise each create their own `agents` window.
+- `silicorism_wait` requeues tasks whose worker stopped heartbeating, so a pane
+  closed mid-run cannot strand everything behind it.
+- Cleanup commits the worktree before removing it and deletes the branch only if
+  it merged, so an unmerged run's work survives on its branch.
 
 ## Test
 ```bash

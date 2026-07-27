@@ -88,3 +88,24 @@ def test_all_tasks_returns_rows_in_id_order(tmp_path):
     b = db.add_task(conn, "echo", "b")
     assert [r["id"] for r in db.all_tasks(conn)] == [a, b]
     conn.close()
+
+
+def test_reap_stale_requeues_only_dead_agents(tmp_path):
+    """A SIGKILLed worker strands its task; a live one must never be robbed."""
+    import time
+
+    dbp = str(tmp_path / "reap.db")
+    db.init_db(dbp)
+    conn = db.connect(dbp)
+    dead = db.add_task(conn, "pi", "{}")
+    live = db.add_task(conn, "pi", "{}")
+    db.claim_task(conn, "gone")
+    db.heartbeat(conn, "gone", "busy", dead)
+    time.sleep(0.05)
+    db.claim_task(conn, "alive")
+    db.heartbeat(conn, "alive", "busy", live)
+
+    assert db.reap_stale(conn, older_than_s=0.02) == 1
+    rows = {r["id"]: r["status"] for r in db.all_tasks(conn)}
+    assert rows[dead] == "pending" and rows[live] == "processing"
+    conn.close()

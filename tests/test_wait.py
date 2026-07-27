@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -79,4 +80,23 @@ def test_status_stays_small(tmp_path):
     status = st.get_status(conn)
     assert len(status["messages"]) <= 5 and len(status["logs"]) <= 5
     assert "x" * 5000 not in str(status)
+    conn.close()
+
+
+def test_the_wait_recovers_a_task_whose_worker_was_killed(tmp_path):
+    """SIGKILL skips the worker's requeue, so the wait has to notice."""
+    import time
+
+    conn, _ = _conn(tmp_path)
+    tid = db.add_task(conn, "echo", "hi")
+    db.claim_task(conn, "killed-worker")
+    db.heartbeat(conn, "killed-worker", "busy", tid)
+    time.sleep(0.05)
+
+    real = db.reap_stale  # the real reaper, with the 5-minute window shortened
+    with patch.object(db, "reap_stale", lambda c, **kw: real(c, older_than_s=0.02)):
+        out = st.wait_for_settle(conn, timeout_s=1, poll=0.05, stop=lambda: True)
+    assert conn.execute("SELECT status FROM tasks WHERE id=?",
+                        (tid,)).fetchone()["status"] == "pending"
+    assert out["settled"] is False  # requeued, not finished
     conn.close()

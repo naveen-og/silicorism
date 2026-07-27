@@ -379,6 +379,9 @@ def wait_for_settle(conn, *, timeout_s=600.0, poll=1.0, stop=None) -> dict:
     deadline = time.monotonic() + min(max(float(timeout_s), 1.0), WAIT_CAP_S)
     already_failed = {f["id"] for f in verify_status(conn)["failures"]}
     while True:
+        # A worker killed hard never requeues its task, and everything behind
+        # it waits for ever; the wait is where that gets noticed.
+        db.reap_stale(conn)
         verdict = verify_status(conn)
         fresh = [f for f in verdict["failures"] if f["id"] not in already_failed]
         if verdict["active"] == 0 or fresh:

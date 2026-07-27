@@ -258,16 +258,26 @@ def worktree_create(payload: str, context=None) -> str:
 
 
 def worktree_cleanup(payload: str, context=None) -> str:
-    """git worktree remove --force <path>, then delete the temp branch."""
+    """Commit the work, remove the worktree, drop the branch only if merged.
+
+    `--force` throws away the working tree, so anything the agent left
+    uncommitted would go with it; commit first. And `branch -d` (not `-D`):
+    with merge=False nothing has merged this branch yet, and force-deleting it
+    would delete the only copy of the work the pipeline just produced.
+    """
     data = _parse(payload, required=("worktree_path",))
-    path = data["worktree_path"]
+    path, branch = data["worktree_path"], data.get("branch")
+    _git(["add", "-A"], cwd=path)
+    _git(["commit", "-m", f"silicorism: {branch or 'work'}"], cwd=path)  # noop if clean
     rm = _git(["worktree", "remove", "--force", path])
     if rm.returncode != 0:
         raise RuntimeError(f"worktree remove: {rm.stderr.strip()[:500]}")
-    if data.get("branch"):
-        _git(["branch", "-D", data["branch"]])  # best-effort; ok if absent
-    _wt_state(data.get("db"), path, "cleaned", branch=data.get("branch"))
-    return f"removed {path}"
+    kept = ""
+    if branch:
+        if _git(["branch", "-d", branch]).returncode != 0:
+            kept = f"; kept branch {branch} (unmerged)"
+    _wt_state(data.get("db"), path, "cleaned", branch=branch)
+    return f"removed {path}{kept}"
 
 
 def worktree_merge(payload: str, context=None) -> str:
