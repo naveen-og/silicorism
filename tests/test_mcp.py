@@ -10,6 +10,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 import silicorism_mcp as mcp  # noqa: E402
+import db  # noqa: E402
+import silicorism_tools  # noqa: E402
 
 
 def test_initialize_echoes_protocol_version():
@@ -160,3 +162,25 @@ def test_simple_complexity_submits_one_agent(tmp_path):
 def test_instructions_forbid_polling_and_claude_execution():
     assert "DO NOT POLL" in mcp.INSTRUCTIONS
     assert "Never assign a Claude model" in mcp.INSTRUCTIONS
+
+def test_gc_prunes_terminal_tasks_but_keeps_live_ones(tmp_path):
+    """A dead pipeline must be clearable without shelling into sqlite."""
+    dbp = str(tmp_path / "prune.db")
+    db.init_db(dbp)
+    conn = db.connect(dbp)
+    done = db.add_task(conn, "pi", '{"prompt": "a"}')
+    conn.execute("UPDATE tasks SET status='failed' WHERE id=?", (done,))
+    conn.commit()
+    live = db.add_task(conn, "pi", '{"prompt": "b"}')
+    assert silicorism_tools.prune_tasks(conn) == {"deleted": 1}
+    left = [r["id"] for r in conn.execute("SELECT id FROM tasks")] 
+    assert left == [live]
+    conn.close()
+
+def test_node_schema_offers_no_claude_harness():
+    """A cold client must not be able to pick a harness that bills Claude."""
+    tool = next(t for t in mcp.TOOLS
+                if t["name"] == "silicorism_plan_and_submit")
+    node = tool["inputSchema"]["properties"]["nodes"]["items"]["properties"]
+    assert node["harness"]["enum"] == ["pi", "verify"]
+    assert "claude" not in mcp.INSTRUCTIONS.lower().split("never")[0]

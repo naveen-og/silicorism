@@ -40,7 +40,8 @@ INSTRUCTIONS = (
     "the DAG nodes. Either way, evaluate multiple implementation routes, pick the "
     "optimal one, and present a plan with (a) selected route + trade-off "
     "rationale, (b) the DAG nodes with their skill assignments, and (c) each "
-    "node's model, harness, and thinking level. Bind discovered skills to the "
+    "node's model and thinking level (harness is always `pi` for execution nodes "
+    "and `verify` for gates). Bind discovered skills to the "
     "nodes that need them; superpowers skills run in YOUR context, not the "
     "execution nodes', which only resolve skills from silicorism_list_skills.\n"
     "4. SUBMIT: call silicorism_plan_and_submit. If you wrote a plan, pass "
@@ -67,7 +68,10 @@ INSTRUCTIONS = (
     "smaller than you and fail on underspecified instructions.\n"
     "Execution models are the bedrock OSS trio with thinking=high: "
     "qwen3-coder-480b (build), kimi-k2.5 (review/fix), glm-5 (reason/scout). "
-    "Never assign a Claude model to an execution node."
+    "Never assign a Claude model to an execution node.\n\nYOU are the orchestrator: you ask the questions, write the plan and gate the "
+    "results yourself. Never delegate the planning or the implementation to another "
+    "Claude agent or subagent — the execution nodes are pi agents on OSS models, and "
+    "that is the only place work runs."
 )
 HERE = os.path.dirname(os.path.abspath(__file__))
 CLI = os.path.join(HERE, "cli.py")
@@ -198,13 +202,16 @@ def _list_skills(args: dict) -> str:
 
 
 def _gc(args: dict) -> str:
-    """Reclaim finished worktrees (failed=true also clears quarantined)."""
+    """Reclaim finished worktrees; failed=true also removes quarantined ones; tasks=true prunes terminal task rows."""
     dbp = _db(args)
     db.init_db(dbp)
     conn = db.connect(dbp)
     try:
-        return json.dumps(silicorism_tools.gc_worktrees(
-            conn, dbp, failed=bool(args.get("failed"))))
+        out = silicorism_tools.gc_worktrees(
+            conn, dbp, failed=bool(args.get("failed")))
+        if args.get("tasks"):
+            out["tasks"] = silicorism_tools.prune_tasks(conn)
+        return json.dumps(out)
     finally:
         conn.close()
 
@@ -231,15 +238,17 @@ TOOLS = [
                             "depends_on": {"type": "array", "items": {"type": "string"},
                                            "description": "ids of prerequisite nodes"},
                             "harness": {"type": "string",
-                                        "enum": ["pi", "claude", "verify"],
-                                        "description": "'verify' makes this node a "
-                                        "test gate: give test_command, not prompt"},
+                                        "enum": ["pi", "verify"],
+                                        "description": "'pi' runs an OSS execution "
+                                        "agent; 'verify' makes this node a test gate: "
+                                        "give test_command, not prompt"},
                             "test_command": {"type": "string",
                                              "description": "harness=verify only"},
                             "model": {"type": "string",
                                       "description": "friendly name: qwen3-coder-480b "
                                       "(build), kimi-k2.5 (review/fix), glm-5 "
-                                      "(reason/scout). Never a Claude model."},
+                                      "(reason/scout). These resolve on the pi harness "
+                                      "only. Never a Claude model."},
                             "thinking": {"type": "string",
                                          "description": "off|minimal|low|medium|high|xhigh|max"},
                             "skills": {"type": "array", "items": {"type": "string"}},
@@ -356,12 +365,15 @@ TOOLS = [
     },
     {
         "name": "silicorism_gc",
-        "description": "Garbage-collect finished worktrees; failed=true also "
-                       "removes quarantined ones.",
+        "description": "Garbage-collect finished worktrees; failed=true also removes quarantined ones; tasks=true prunes terminal task rows.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "failed": {"type": "boolean"},
+                "tasks": {"type": "boolean",
+                          "description": "also delete completed/failed task rows "
+                                         "(and their logs) so a dead pipeline stops "
+                                         "poisoning the wait verdict"},
                 "db": {"type": "string"},
             },
         },
