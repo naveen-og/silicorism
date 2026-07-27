@@ -56,26 +56,69 @@ def _native_payload(task) -> str:
     return json.dumps(data)
 
 
+def _pane_label(task) -> str:
+    """Agent id makes the best pane label; fall back to the task type."""
+    try:
+        data = json.loads(task["payload"] or "{}")
+        if isinstance(data, dict) and data.get("agent_id"):
+            return str(data["agent_id"])
+    except (json.JSONDecodeError, ValueError):
+        pass
+    return f"{task['task_type']}-{task['id']}"
+
+
+def _place_pane(conn, task, command: str, sentinel: str, logfile: str):
+    """Put the agent in a grid pane; fall back to a window if tmux misbehaves.
+
+    Returns (window, pane_id); pane_id is None on the fallback path.
+    """
+    tid = task["id"]
+    cwd = _task_cwd(task)
+    try:
+        window, pane = tmux.grid_pane(tid, _pane_label(task), cwd, command,
+                                      sentinel, logfile=logfile)
+        db.set_pane_target(conn, tid, f"{window}.{pane}")
+        return window, pane
+    except Exception:  # noqa: BLE001 - the grid is a viewport, never a dependency
+        window = tmux.run_task_in_pane(tid, task["task_type"], cwd, command,
+                                       sentinel, logfile=logfile)
+        return window, None
+
+
+def _mark_pane(task_id, pane, *, failed: bool) -> None:
+    """Retitle the grid pane, or the legacy window when there is no pane id."""
+    try:
+        if pane:
+            tmux.mark_pane_done(pane, failed=failed)
+        else:
+            tmux.mark_done(task_id, failed=failed)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _run_native(conn, task, agent_id, command: str) -> None:
     """Execute an agent live in a tmux pane; raise on non-zero/absent exit."""
     tid = task["id"]
-    cwd = _task_cwd(task)
     sentinel = tmux.sentinel_path(tid)
     logf = tmux.log_path(tid)
     tmux.ensure_session()
-    win = tmux.run_task_in_pane(tid, task["task_type"], cwd, command, sentinel,
-                                logfile=logf)
-    db.log(conn, tid, agent_id, f"native pane {win} at {cwd}")
-    code = tmux.wait_for_exit(sentinel, stop=lambda: _STOP)
-    if code != 0:
-        raise RuntimeError(f"native agent exit {code if code is not None else 'timeout'}")
+    win, pane = _place_pane(conn, task, command, sentinel, logf)
+    db.log(conn, tid, agent_id, f"native pane {win}{'.' + pane if pane else ''}")
+    try:
+        code = tmux.wait_for_exit(sentinel, stop=lambda: _STOP)
+        if code != 0:
+            raise RuntimeError(
+                f"native agent exit {code if code is not None else 'timeout'}")
+    except Exception:
+        _mark_pane(tid, pane, failed=True)
+        raise
     # Prefer the clean autoexit artifact; fall back to the raw log tail.
     artifact = (tmux.read_log_tail(_artifact_path(tid), max_chars=4000)
                 or tmux.read_log_tail(logf)
                 or f"native pane {win} exit 0")
     db.complete_task(conn, tid, artifact=artifact)
     db.log(conn, tid, agent_id, f"completed (native): {win}")
-    tmux.mark_done(tid, failed=False)
+    _mark_pane(tid, pane, failed=False)
 
 
 def _open_task_window(db_path, task) -> None:
@@ -149,12 +192,7 @@ def run_worker(db_path: str, agent_id: str, *, idle_sleep: float = 0.1,
                     if stronger:
                         db.set_payload(conn, tid, stronger)
                         db.log(conn, tid, agent_id, "escalated model for retry")
-                if native_cmd is not None:
-                    try:
-                        tmux.mark_done(tid, failed=True)
-                    except Exception:  # noqa: BLE001
-                        pass
-                else:
+                if native_cmd is None:  # native panes are marked in _run_native
                     _close_task_window(tid, failed=True)
     finally:
         db.requeue_agent_tasks(conn, agent_id)

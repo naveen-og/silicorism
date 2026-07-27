@@ -146,3 +146,43 @@ def test_next_spill_window_skips_gap_instead_of_colliding():
     fake.panes["agents-3"] = [f"%{i + 100}" for i in range(tmux.GRID_MAX)]
     (window, _), = _place(fake, 1)
     assert window == "agents-4", window
+
+
+def test_worker_falls_back_to_a_window_when_the_grid_fails(tmp_path):
+    """tmux breakage must never fail a task — the pane is a viewport, not a dep."""
+    import db
+    import worker
+
+    dbp = str(tmp_path / "w.db")
+    db.init_db(dbp)
+    conn = db.connect(dbp)
+    tid = db.add_task(conn, "pi", "{}")
+    task = conn.execute("SELECT * FROM tasks WHERE id=?", (tid,)).fetchone()
+
+    with patch.object(worker.tmux, "grid_pane", side_effect=RuntimeError("no server")), \
+         patch.object(worker.tmux, "run_task_in_pane",
+                      return_value="task-1-pi") as legacy:
+        window, pane = worker._place_pane(conn, task, "pi 'go'", "/tmp/s", "/tmp/l")
+
+    assert pane is None and window == "task-1-pi"
+    assert legacy.called
+    conn.close()
+
+
+def test_worker_records_the_pane_target(tmp_path):
+    import db
+    import worker
+
+    dbp = str(tmp_path / "w2.db")
+    db.init_db(dbp)
+    conn = db.connect(dbp)
+    tid = db.add_task(conn, "pi", '{"agent_id": "builder-x"}')
+    task = conn.execute("SELECT * FROM tasks WHERE id=?", (tid,)).fetchone()
+
+    with patch.object(worker.tmux, "grid_pane", return_value=("agents", "%7")):
+        worker._place_pane(conn, task, "pi 'go'", "/tmp/s", "/tmp/l")
+
+    stored = conn.execute("SELECT pane_target FROM tasks WHERE id=?",
+                          (tid,)).fetchone()["pane_target"]
+    assert stored == "agents.%7"
+    conn.close()
