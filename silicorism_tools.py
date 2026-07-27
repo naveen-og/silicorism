@@ -102,6 +102,93 @@ def _build_simple(conn, db_path, name, prompt, *, test_command=None,
     return {"name": name, "worktree_path": work, "tasks": tasks}
 
 
+SPLIT_NOTE = (
+    "Partition the work into exactly TWO slices that touch DISJOINT files. "
+    "Write CONTEXT.md, then end your reply with:\n"
+    "SLICE A: <files and what to build>\n"
+    "SLICE B: <files and what to build>\n"
+    "Overlapping slices cause merge conflicts downstream — keep them disjoint."
+)
+
+
+def _build_complex(conn, db_path, name, prompt, *, base="main",
+                   test_command=None, max_attempts=3, merge=False) -> dict:
+    """Two builders in separate worktrees, joined by a merge + integrator agent.
+
+    The scout partitions the work; each builder receives that partition through
+    the existing artifact hand-off (dep_artifacts -> _with_context), so
+    builder-b needs no file from worktree-a.
+    """
+    test_command = test_command or "pytest -q"
+    name_a, name_b = f"{name}-a", f"{name}-b"
+    path_a = os.path.join(WORKTREE_ROOT, name_a)
+    path_b = os.path.join(WORKTREE_ROOT, name_b)
+    wt_a = db.add_task(conn, "worktree_create",
+                       json.dumps({"branch": name_a, "base": base, "db": db_path}),
+                       worktree_path=path_a)
+    wt_b = db.add_task(conn, "worktree_create",
+                       json.dumps({"branch": name_b, "base": base, "db": db_path}),
+                       worktree_path=path_b)
+    scout = db.add_task(conn, "pi", json.dumps({
+        "model": DEFAULT_MODELS["scout"], "thinking": DEFAULT_THINKING,
+        "cwd": path_a, "p2p": True, "agent_id": f"scout-{name}", "db": db_path,
+        "prompt": f"Scout the repo for: {prompt}. {SPLIT_NOTE}",
+    }), depends_on=[wt_a, wt_b], worktree_path=path_a)
+    builder_a = db.add_task(conn, "pi", json.dumps({
+        "model": DEFAULT_MODELS["builder"], "thinking": DEFAULT_THINKING,
+        "cwd": path_a, "p2p": True, "agent_id": f"builder-a-{name}", "db": db_path,
+        "prompt": f"Builder A: implement SLICE A only. {prompt}",
+    }), depends_on=scout, worktree_path=path_a)
+    builder_b = db.add_task(conn, "pi", json.dumps({
+        "model": DEFAULT_MODELS["builder"], "thinking": DEFAULT_THINKING,
+        "cwd": path_b, "p2p": True, "agent_id": f"builder-b-{name}", "db": db_path,
+        "prompt": f"Builder B: implement SLICE B only. {prompt}",
+    }), depends_on=scout, worktree_path=path_b)
+    integrate = db.add_task(conn, "worktree_integrate", json.dumps({
+        "into": path_a, "from_worktree": path_b, "branch": name_b, "db": db_path,
+    }), depends_on=[builder_a, builder_b], worktree_path=path_a, max_retries=0)
+    integrator = db.add_task(conn, "pi", json.dumps({
+        "model": DEFAULT_MODELS["fixer"], "thinking": DEFAULT_THINKING,
+        "cwd": path_a, "p2p": True, "agent_id": f"integrator-{name}", "db": db_path,
+        "prompt": ("Integration step. The prior task's artifact says either "
+                   "'clean' or 'conflicts: <files>'. If clean, reply 'nothing "
+                   "to do' and stop. Otherwise resolve every conflict marker in "
+                   "those files, keeping BOTH slices' behaviour, then "
+                   "`git add -A && git commit`."),
+    }), depends_on=integrate, worktree_path=path_a)
+    fixer = db.add_task(conn, "fixer_loop", json.dumps({
+        "test_command": test_command, "agent_type": "pi",
+        "model": DEFAULT_MODELS["fixer"], "thinking": DEFAULT_THINKING,
+        "cwd": path_a, "max_attempts": max_attempts, "db": db_path,
+        "upstream": f"integrator-{name}", "agent_id": f"fixer-{name}",
+    }), depends_on=integrator, worktree_path=path_a)
+    verify_id = db.add_task(conn, "verify",
+                            json.dumps({"test_command": test_command, "cwd": path_a}),
+                            depends_on=fixer, worktree_path=path_a, max_retries=0)
+    tasks = {"worktree_a": wt_a, "worktree_b": wt_b, "scout": scout,
+             "builder_a": builder_a, "builder_b": builder_b,
+             "integrate": integrate, "integrator": integrator,
+             "fixer": fixer, "verify": verify_id}
+    last = verify_id
+    if merge:
+        last = db.add_task(conn, "worktree_merge",
+                           json.dumps({"worktree_path": path_a, "branch": name_a,
+                                       "base": base, "db": db_path}),
+                           depends_on=last, worktree_path=path_a, max_retries=0)
+        tasks["merge"] = last
+    # Both cleanups trail the last work node: a failed run keeps its worktrees
+    # and branches for post-mortem.
+    tasks["cleanup_a"] = db.add_task(
+        conn, "worktree_cleanup",
+        json.dumps({"worktree_path": path_a, "branch": name_a, "db": db_path}),
+        depends_on=last, worktree_path=path_a)
+    tasks["cleanup_b"] = db.add_task(
+        conn, "worktree_cleanup",
+        json.dumps({"worktree_path": path_b, "branch": name_b, "db": db_path}),
+        depends_on=last, worktree_path=path_b)
+    return {"name": name, "worktree_path": path_a, "tasks": tasks}
+
+
 def build_pipeline(conn, db_path, name, prompt, *, base="main",
                    test_command=None, max_attempts=3, merge=False,
                    complexity="standard", cwd=None) -> dict:
@@ -109,6 +196,7 @@ def build_pipeline(conn, db_path, name, prompt, *, base="main",
 
       simple    one agent (qwen3-coder-480b) in cwd, verify iff test_command
       standard  worktree -> scout -> builder -> fixer -> verify [-> merge] -> cleanup
+      complex   parallel builders in separate worktrees joined by an integrator
 
     An unknown tier degrades to `standard` — a typo in a planning hint must
     not fail a submit.
@@ -116,6 +204,10 @@ def build_pipeline(conn, db_path, name, prompt, *, base="main",
     if complexity == "simple":
         return _build_simple(conn, db_path, name, prompt,
                              test_command=test_command, cwd=cwd)
+    if complexity == "complex":
+        return _build_complex(conn, db_path, name, prompt, base=base,
+                              test_command=test_command,
+                              max_attempts=max_attempts, merge=merge)
     return _build_standard(conn, db_path, name, prompt, base=base,
                            test_command=test_command,
                            max_attempts=max_attempts, merge=merge)

@@ -293,6 +293,33 @@ def worktree_merge(payload: str, context=None) -> str:
     return f"merged {branch} into {base}"
 
 
+def worktree_integrate(payload: str, context=None) -> str:
+    """Merge one worktree's branch into another worktree, in place.
+
+    Payload: {into, from_worktree, branch, db?}. `worktree_merge` cannot do
+    this: it runs `git switch <base>` in the main repo, and git refuses to
+    check out a branch that is already checked out in another worktree. Here
+    the target branch is already checked out in `into`, so no switch happens.
+
+    Contract differs from worktree_merge on purpose: a conflict does NOT abort.
+    The conflicted tree is left in place and the conflicting paths are returned,
+    so the integrator agent downstream has something concrete to resolve.
+    """
+    data = _parse(payload, required=("into", "from_worktree", "branch"))
+    into, src, branch = data["into"], data["from_worktree"], data["branch"]
+    # Agents leave work uncommitted; commit the source so the merge can see it.
+    _git(["add", "-A"], cwd=src)
+    _git(["commit", "-m", f"silicorism: {branch}"], cwd=src)  # noop if clean
+    mg = _git(["merge", "--no-ff", "-m", f"silicorism: integrate {branch}",
+               branch], cwd=into)
+    if mg.returncode == 0:
+        return "clean"
+    conflicted = _git(["diff", "--name-only", "--diff-filter=U"], cwd=into)
+    files = [f for f in conflicted.stdout.split() if f]
+    _wt_state(data.get("db"), into, "conflicted", branch=branch)
+    return "conflicts: " + ", ".join(files or ["unknown"])
+
+
 def verify(payload: str, context=None) -> str:
     """Deterministic gate: run the test command; non-zero exit fails the task.
 
@@ -396,6 +423,7 @@ HANDLERS = {
     "worktree_create": worktree_create,
     "worktree_cleanup": worktree_cleanup,
     "worktree_merge": worktree_merge,
+    "worktree_integrate": worktree_integrate,
     "verify": verify,
     "fixer_loop": fixer_loop,
 }

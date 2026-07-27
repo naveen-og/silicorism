@@ -71,3 +71,48 @@ def test_unknown_tier_falls_back_to_standard(tmp_path):
     assert list(out["tasks"]) == ["worktree", "scout", "builder", "fixer",
                                   "verify", "cleanup"]
     conn.close()
+
+
+def test_complex_forks_two_builders_from_the_scout(tmp_path):
+    conn, dbp = _conn(tmp_path)
+    out = st.build_pipeline(conn, dbp, "big", "rewrite the parser",
+                            complexity="complex")
+    t = out["tasks"]
+    assert set(t) >= {"worktree_a", "worktree_b", "scout", "builder_a",
+                      "builder_b", "integrate", "integrator", "fixer",
+                      "verify", "cleanup_a", "cleanup_b"}
+
+    def deps(key):
+        row = conn.execute("SELECT depends_on FROM tasks WHERE id=?",
+                           (t[key],)).fetchone()
+        return json.loads(row["depends_on"] or "[]")
+
+    # Both builders hang off the scout - that is the fan-out.
+    assert deps("builder_a") == [t["scout"]]
+    assert deps("builder_b") == [t["scout"]]
+    # Integration waits for both.
+    assert set(deps("integrate")) == {t["builder_a"], t["builder_b"]}
+    assert deps("integrator") == [t["integrate"]]
+    conn.close()
+
+
+def test_complex_gives_each_builder_its_own_worktree(tmp_path):
+    conn, dbp = _conn(tmp_path)
+    out = st.build_pipeline(conn, dbp, "big", "rewrite the parser",
+                            complexity="complex")
+    a = _payload(conn, out["tasks"]["builder_a"])["cwd"]
+    b = _payload(conn, out["tasks"]["builder_b"])["cwd"]
+    assert a != b, "concurrent builders must not share a worktree"
+
+
+def test_complex_cleans_up_both_worktrees_last(tmp_path):
+    conn, dbp = _conn(tmp_path)
+    out = st.build_pipeline(conn, dbp, "big", "rewrite", complexity="complex")
+    t = out["tasks"]
+    for key in ("cleanup_a", "cleanup_b"):
+        row = conn.execute("SELECT depends_on FROM tasks WHERE id=?",
+                           (t[key],)).fetchone()
+        # Cleanup trails the last real work node, so a failed run keeps its
+        # worktree (and branch) intact for post-mortem.
+        assert json.loads(row["depends_on"])[0] >= t["verify"]
+    conn.close()
