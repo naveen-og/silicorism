@@ -22,7 +22,11 @@ class FakeTmux:
         self.panes = {w: [] for w in self.windows}
         self._next = 0
 
-    def __call__(self, cmd, **kw):
+    def __call__(self, *args, **kw):
+        # Two call shapes reach here: subprocess.run(["tmux", ...]) from _place,
+        # and _tmux("list-windows", ...) when this fake stands in for _tmux itself.
+        cmd = (list(args[0]) if len(args) == 1 and isinstance(args[0], (list, tuple))
+               else ["tmux"] + list(args))
         self.calls.append(list(cmd))
         argv = cmd[1:]  # drop "tmux"
         out = ""
@@ -265,7 +269,8 @@ def test_pane_placement_is_serialised_across_processes():
 def test_a_user_window_named_my_agents_is_not_seen_as_the_grid():
     """list-windows output is line-oriented; splitting on spaces invents windows."""
     fake = FakeTmux(existing=["dashboard", "my agents", "notes"])
-    assert tmux._grid_windows("s") == []
+    with patch("tmux_orchestrator._tmux", side_effect=fake):
+        assert tmux._grid_windows("s") == []
 
 
 def test_log_tails_are_stripped_of_escape_codes(tmp_path):
