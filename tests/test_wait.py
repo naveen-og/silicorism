@@ -35,15 +35,28 @@ def test_times_out_while_work_is_still_pending(tmp_path):
     conn.close()
 
 
-def test_returns_early_on_the_first_failure(tmp_path):
-    """A failed node must not cost the orchestrator a full timeout of waiting."""
+def test_a_doomed_run_settles_instead_of_waiting_out_the_timeout(tmp_path):
+    """A node stranded behind a failure never runs; waiting on it is forever."""
     conn, _ = _conn(tmp_path)
     tid = db.add_task(conn, "fail", "boom", max_retries=0)
-    db.add_task(conn, "echo", "still pending")
+    db.add_task(conn, "echo", "downstream", depends_on=tid)
     db.claim_task(conn, "w")
     db.fail_task(conn, tid)
     out = st.wait_for_settle(conn, timeout_s=30, poll=0.01)
     assert out["settled"] is True and out["failures"]
+    assert out["active"] == 0 and out["blocked"] == 1
+    conn.close()
+
+
+def test_an_old_failure_does_not_settle_a_fresh_wait(tmp_path):
+    """Failed rows never clear — settling on them would spin the resubmit loop."""
+    conn, _ = _conn(tmp_path)
+    tid = db.add_task(conn, "fail", "boom", max_retries=0)
+    db.add_task(conn, "echo", "unrelated work still to do")
+    db.claim_task(conn, "w")
+    db.fail_task(conn, tid)
+    out = st.wait_for_settle(conn, timeout_s=1, poll=0.05)
+    assert out["settled"] is False and out["active"] == 1
     conn.close()
 
 

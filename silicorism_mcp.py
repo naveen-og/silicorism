@@ -1,8 +1,8 @@
 """Silicorism MCP server — pure-stdlib JSON-RPC 2.0 over stdio.
 
-Exposes the orchestrator to Claude Code (or any MCP client) with four tools:
-silicorism_plan_and_submit, silicorism_get_status, silicorism_start_workers,
-silicorism_gc. No dependency on the `mcp` package — the stdio transport is just
+Exposes the orchestrator to Claude Code (or any MCP client): plan_and_submit,
+wait, get_status, verify_and_continue, start_workers, list_skills, gc. No
+dependency on the `mcp` package — the stdio transport is just
 newline-delimited JSON-RPC, so a few dozen lines of stdlib cover it.
 
 Register with Claude Code:  claude mcp add silicorism -- silicorism-mcp
@@ -45,7 +45,9 @@ INSTRUCTIONS = (
     "to watch with `tmux attach -t silicorism-session`.\n"
     "5. WAIT, DO NOT POLL: call silicorism_wait once. It blocks until the queue "
     "settles and returns the verdict. Polling silicorism_get_status in a loop "
-    "burns a full turn per poll for no information.\n"
+    "burns a full turn per poll for no information. If it returns settled with "
+    "`active` above 0, call silicorism_wait again before resubmitting — other "
+    "agents are still writing to that worktree.\n"
     "6. VERIFY & LOOP: if not satisfied, inspect the failed tasks' artifacts and "
     "errors, formulate a corrective DAG, and resubmit until every requirement and "
     "test gate is met.\n"
@@ -86,7 +88,7 @@ def _plan_and_submit(args: dict) -> str:
 
     Pass `nodes` for a custom DAG (each node: id, prompt, depends_on, harness,
     model, thinking, skills) — this is the orchestrator's real planning surface.
-    Or pass `prompt` for the default 5-task pipeline fallback. Workers spawn
+    Or pass `prompt` + `complexity` for a built-in tier. Workers spawn
     automatically (SILICORISM_NATIVE=1) unless workers=0.
     """
     dbp = _db(args)
@@ -201,8 +203,8 @@ TOOLS = [
         "name": "silicorism_plan_and_submit",
         "description": "Submit a plan AND auto-start native-pane workers in one "
                        "action. Pass 'nodes' for a custom DAG you design (per-node "
-                       "harness/model/thinking/skills), or 'prompt' for the default "
-                       "5-task pipeline. Watch live with: tmux attach -t "
+                       "harness/model/thinking/skills), or 'prompt' for a built-in "
+                       "tier (see 'complexity'). Watch live with: tmux attach -t "
                        "silicorism-session.",
         "inputSchema": {
             "type": "object",
@@ -219,9 +221,9 @@ TOOLS = [
                                            "description": "ids of prerequisite nodes"},
                             "harness": {"type": "string", "enum": ["pi", "claude"]},
                             "model": {"type": "string",
-                                      "description": "friendly name (deepseek-v4-flash, "
-                                      "nemotron-3-ultra, hy3, mimo-2.5, north-mini-code) "
-                                      "or full opencode id"},
+                                      "description": "friendly name: qwen3-coder-480b "
+                                      "(build), kimi-k2.5 (review/fix), glm-5 "
+                                      "(reason/scout). Never a Claude model."},
                             "thinking": {"type": "string",
                                          "description": "off|minimal|low|medium|high|xhigh|max"},
                             "skills": {"type": "array", "items": {"type": "string"}},
@@ -248,7 +250,11 @@ TOOLS = [
                 "max_attempts": {"type": "integer"},
                 "workers": {"type": "integer",
                             "description": "Workers to auto-start (default 3, 0 = none)"},
-                "cwd": {"type": "string"},
+                "cwd": {"type": "string",
+                        "description": "Absolute path the agents write to. "
+                                       "Required for complexity=simple, which "
+                                       "has no worktree; otherwise it defaults "
+                                       "to this server's working directory."},
                 "db": {"type": "string", "description": "Override DB path"},
             },
         },
@@ -269,7 +275,9 @@ TOOLS = [
                 "name": {"type": "string"},
                 "base": {"type": "string"},
                 "workers": {"type": "integer"},
-                "cwd": {"type": "string"},
+                "cwd": {"type": "string",
+                        "description": "Absolute path the corrective DAG's "
+                                       "nodes run in."},
                 "db": {"type": "string"},
             },
         },

@@ -301,15 +301,44 @@ def build_dag(conn, db_path, nodes, *, name=None, base="main", cwd=None) -> dict
     return result
 
 
+def _dead_task_ids(rows) -> set:
+    """Pending tasks that can never run: a dependency failed, or is itself dead.
+
+    Without this the queue never settles after a failure — a failed node's
+    dependents stay `pending` for ever, so `active` never reaches 0 and the
+    orchestrator's verify loop has no exit condition.
+    """
+    status = {r["id"]: r["status"] for r in rows}
+    deps = {}
+    for r in rows:
+        try:
+            d = json.loads(r["depends_on"] or "[]")
+        except (json.JSONDecodeError, ValueError, TypeError):
+            d = []
+        deps[r["id"]] = d if isinstance(d, list) else []
+    doomed = {i for i, s in status.items() if s == "failed"}
+    changed = True
+    while changed:  # transitive: a dependent of a dead task is dead too
+        changed = False
+        for tid, ds in deps.items():
+            if (tid not in doomed and status.get(tid) == "pending"
+                    and any(d in doomed for d in ds)):
+                doomed.add(tid)
+                changed = True
+    return {i for i in doomed if status.get(i) == "pending"}
+
+
 def verify_status(conn) -> dict:
     """Verdict for the orchestrator loop: is the goal met, and if not, why.
 
     satisfied = nothing pending/processing, no failed tasks, at least one done.
     failures carry each failed task's artifact + last error log so the caller
-    can generate a corrective DAG.
+    can generate a corrective DAG. `active` excludes tasks stranded behind a
+    failure — they will never run, so waiting on them is waiting for ever.
     """
     counts = db.counts(conn)
-    active = counts["pending"] + counts["processing"]
+    blocked = _dead_task_ids(db.all_tasks(conn))
+    active = counts["pending"] + counts["processing"] - len(blocked)
     failures = []
     for r in conn.execute(
             "SELECT id, task_type, output_artifact FROM tasks "
@@ -324,25 +353,33 @@ def verify_status(conn) -> dict:
         "satisfied": active == 0 and counts["failed"] == 0 and counts["completed"] > 0,
         "tasks": counts,
         "active": active,
+        "blocked": len(blocked),
         "failures": failures,
         "quarantined": [w["path"] for w in db.worktrees(conn, "quarantined")],
     }
 
 
-WAIT_CAP_S = 3600.0
+# Capped below the 30-minute idle window an MCP stdio client allows a tool
+# call that sends no progress notifications.
+WAIT_CAP_S = 1800.0
 
 
 def wait_for_settle(conn, *, timeout_s=600.0, poll=1.0, stop=None) -> dict:
     """Block until the queue settles, then return the verdict once.
 
-    Settled = nothing pending or processing, OR at least one task has failed
-    (waiting out a doomed run costs the orchestrator a turn for nothing). This
-    replaces the poll loop: one Claude turn per DAG instead of one per poll.
+    Settled = nothing runnable is left, OR a task failed *during this wait*
+    (waiting out a doomed run costs the orchestrator a turn for nothing).
+    Failures already on the books at entry do not count: they never clear, so
+    settling on them would turn every later wait into an instant return.
+
+    This replaces the poll loop: one Claude turn per DAG, not one per poll.
     """
     deadline = time.monotonic() + min(max(float(timeout_s), 1.0), WAIT_CAP_S)
+    already_failed = {f["id"] for f in verify_status(conn)["failures"]}
     while True:
         verdict = verify_status(conn)
-        if verdict["active"] == 0 or verdict["failures"]:
+        fresh = [f for f in verdict["failures"] if f["id"] not in already_failed]
+        if verdict["active"] == 0 or fresh:
             verdict["settled"] = True
             return verdict
         if (stop and stop()) or time.monotonic() >= deadline:
