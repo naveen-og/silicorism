@@ -23,16 +23,21 @@ DEFAULT_MODELS = {
 }
 DEFAULT_THINKING = "high"
 
+# `simple` runs one agent on the strongest coder in the trio; no scout to read
+# a codebase that may not exist yet, no fixer loop for a task this size.
+SIMPLE_MODEL = "bedrock-mantle/qwen.qwen3-coder-480b-a35b-instruct"
 
-def build_pipeline(conn, db_path, name, prompt, *, base="main",
-                   test_command="pytest -q", max_attempts=3,
-                   merge=False) -> dict:
+
+def _build_standard(conn, db_path, name, prompt, *, base="main",
+                    test_command=None, max_attempts=3,
+                    merge=False) -> dict:
     """Insert the DAG: worktree->scout->builder->fixer->verify[->merge]->cleanup.
 
     `verify` re-runs the tests deterministically — cleanup is unreachable unless
     they exit 0. `merge=True` adds a merge-back-to-base node after the gate.
     Returns {"name","worktree_path","tasks":{...}}.
     """
+    test_command = test_command or "pytest -q"
     path = os.path.join(WORKTREE_ROOT, name)
     t1 = db.add_task(conn, "worktree_create",
                      json.dumps({"branch": name, "base": base, "db": db_path}),
@@ -70,6 +75,47 @@ def build_pipeline(conn, db_path, name, prompt, *, base="main",
         json.dumps({"worktree_path": path, "branch": name, "db": db_path}),
         depends_on=last, worktree_path=path)
     return {"name": name, "worktree_path": path, "tasks": tasks}
+
+
+def _build_simple(conn, db_path, name, prompt, *, test_command=None,
+                  cwd=None) -> dict:
+    """One agent in the current directory; verify only if there is a command.
+
+    No worktree: a fresh scratch project has no git repo to branch from. No
+    unconditional verify gate: it would fail a project that has no tests yet.
+    """
+    work = cwd or os.getcwd()
+    solo = db.add_task(conn, "pi", json.dumps({
+        "model": SIMPLE_MODEL, "thinking": DEFAULT_THINKING,
+        "cwd": work, "p2p": False, "agent_id": f"solo-{name}", "db": db_path,
+        "prompt": prompt,
+    }))
+    tasks = {"solo": solo}
+    if test_command:
+        tasks["verify"] = db.add_task(
+            conn, "verify",
+            json.dumps({"test_command": test_command, "cwd": work}),
+            depends_on=solo, max_retries=0)
+    return {"name": name, "worktree_path": work, "tasks": tasks}
+
+
+def build_pipeline(conn, db_path, name, prompt, *, base="main",
+                   test_command=None, max_attempts=3, merge=False,
+                   complexity="standard", cwd=None) -> dict:
+    """Build a DAG sized to the request. Tiers:
+
+      simple    one agent (qwen3-coder-480b) in cwd, verify iff test_command
+      standard  worktree -> scout -> builder -> fixer -> verify [-> merge] -> cleanup
+
+    An unknown tier degrades to `standard` — a typo in a planning hint must
+    not fail a submit.
+    """
+    if complexity == "simple":
+        return _build_simple(conn, db_path, name, prompt,
+                             test_command=test_command, cwd=cwd)
+    return _build_standard(conn, db_path, name, prompt, base=base,
+                           test_command=test_command,
+                           max_attempts=max_attempts, merge=merge)
 
 
 def _toposort(nodes: list[dict]) -> list[str]:
