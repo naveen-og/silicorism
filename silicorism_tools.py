@@ -85,17 +85,20 @@ def _build_simple(conn, db_path, name, prompt, *, test_command=None,
     unconditional verify gate: it would fail a project that has no tests yet.
     """
     work = cwd or os.getcwd()
+    # worktree_path is set even though no worktree is created: gc_worktrees
+    # keys "is anyone still working here?" off it, and would otherwise be free
+    # to remove a directory this agent is writing to.
     solo = db.add_task(conn, "pi", json.dumps({
         "model": SIMPLE_MODEL, "thinking": DEFAULT_THINKING,
         "cwd": work, "p2p": False, "agent_id": f"solo-{name}", "db": db_path,
         "prompt": prompt,
-    }))
+    }), worktree_path=work)
     tasks = {"solo": solo}
     if test_command:
         tasks["verify"] = db.add_task(
             conn, "verify",
             json.dumps({"test_command": test_command, "cwd": work}),
-            depends_on=solo, max_retries=0)
+            depends_on=solo, max_retries=0, worktree_path=work)
     return {"name": name, "worktree_path": work, "tasks": tasks}
 
 
