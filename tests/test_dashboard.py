@@ -94,3 +94,41 @@ def test_lines_are_truncated_never_wrapped():
                                               "completed": 0, "failed": 0},
                                   width=40, now=NOW)
     assert all(len(line) <= 40 for line in frame), frame
+
+
+def test_orphans_are_listed_not_swallowed():
+    """A task whose parent is gone must still appear — the counts include it."""
+    tasks = [_row(1, "pi", "completed"),
+             _row(2, "pi", "processing", deps=[99]),
+             _row(3, "pi", "pending", deps=[2])]
+    frame = dashboard.build_frame(tasks, [], {"pending": 1, "processing": 1,
+                                              "completed": 1, "failed": 0},
+                                  now=NOW)
+    text = "\n".join(frame)
+    assert "(orphaned)" in text
+    assert len([ln for ln in frame if "] pi" in ln]) == 3
+
+
+def test_a_dependency_cycle_terminates():
+    tasks = [_row(1, "pi", "pending", deps=[2]), _row(2, "pi", "pending", deps=[1])]
+    frame = dashboard.build_frame(tasks, [], {"pending": 2, "processing": 0,
+                                              "completed": 0, "failed": 0},
+                                  now=NOW)
+    assert len([ln for ln in frame if "] pi" in ln]) == 2
+
+
+def test_malformed_depends_on_does_not_raise():
+    tasks = [_row(1, "pi", "pending"), _row(2, "pi", "pending")]
+    tasks[1]["depends_on"] = "7"  # a bare scalar, not a list
+    frame = dashboard.build_frame(tasks, [], {"pending": 2, "processing": 0,
+                                              "completed": 0, "failed": 0},
+                                  now=NOW)
+    assert len([ln for ln in frame if "] pi" in ln]) == 2
+
+
+def test_the_p2p_feed_survives_a_short_terminal():
+    lines = [f"row {i}" for i in range(40)] + ["", " P2P", "  a->b: hi"]
+    fitted = dashboard._fit(lines, 10)
+    assert len(fitted) == 10
+    assert fitted[-1] == "  a->b: hi" and " P2P" in fitted
+    assert " ..." in fitted

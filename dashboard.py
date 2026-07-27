@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import curses
 import json
+import shutil
 import time
 from datetime import datetime, timezone
 
@@ -20,7 +21,11 @@ _TS = "%Y-%m-%dT%H:%M:%S.%fZ"
 _STATUS = {"completed": "done", "processing": "run", "failed": "FAIL",
            "pending": "wait"}
 # Full model id -> the friendly name, so the tree column stays narrow.
-_SHORT = {v: k for k, v in handlers.MODEL_ALIASES.items()}
+# setdefault, not a comprehension: two aliases share one id (mimo-2.5 /
+# mimo-v2.5) and the first one listed is the name we want to show.
+_SHORT: dict[str, str] = {}
+for _name, _id in handlers.MODEL_ALIASES.items():
+    _SHORT.setdefault(_id, _name)
 
 
 def _parse_ts(value):
@@ -68,6 +73,8 @@ def _children(tasks) -> dict:
             deps = json.loads(row["depends_on"] or "[]")
         except (json.JSONDecodeError, ValueError, TypeError):
             deps = []
+        if not isinstance(deps, list):  # a scalar or object would blow up on [0]
+            deps = []
         kids.setdefault(deps[0] if deps else None, []).append(row)
     return kids
 
@@ -79,24 +86,36 @@ def build_frame(tasks, messages, counts, *, width=100, now=None) -> list[str]:
              f" pending {counts['pending']}   running {counts['processing']}"
              f"   done {counts['completed']}   failed {counts['failed']}", ""]
     kids = _children(tasks)
+    seen: set = set()
+
+    def row_line(row, depth):
+        prefix = "  " * depth + ("+-" if depth else "")
+        status = _STATUS.get(row["status"], row["status"])
+        return (f" {prefix}[{status}] {row['task_type']:<16} "
+                f"{short_model(row['payload']):<18} "
+                f"{elapsed(row, now):>6}  {row['pane_target'] or ''}")
 
     def walk(parent, depth):
         for row in kids.get(parent, []):
-            prefix = "  " * depth + ("+-" if depth else "")
-            status = _STATUS.get(row["status"], row["status"])
-            lines.append(
-                f" {prefix}[{status}] {row['task_type']:<16} "
-                f"{short_model(row['payload']):<18} "
-                f"{elapsed(row, now):>6}  {row['pane_target'] or ''}")
+            if row["id"] in seen:  # a first-dep cycle would otherwise recurse
+                continue
+            seen.add(row["id"])
+            lines.append(row_line(row, depth))
             walk(row["id"], depth + 1)
 
     walk(None, 0)
+    # Rows whose first dependency is missing (or cyclic) are unreachable from
+    # the root; list them rather than let the tree silently swallow them.
+    orphans = [r for r in tasks if r["id"] not in seen]
+    if orphans:
+        lines.append(" (orphaned)")
+        lines += [row_line(r, 1) for r in orphans]
     if not tasks:
         lines.append(" (no tasks)")
     lines += ["", " P2P"]
     if not messages:
         lines.append("  (none)")
-    for m in messages:
+    for m in reversed(messages):  # recent_messages is newest-first; read down
         body = (m["content"] or "").replace("\n", " ")
         lines.append(f"  {m['sender_id']}->{m['recipient_id']}: {body}")
     return [ln[:width] for ln in lines]
@@ -108,12 +127,20 @@ def frame(conn, *, width=100) -> list[str]:
                        db.counts(conn), width=width)
 
 
+def _fit(lines: list[str], height: int) -> list[str]:
+    """Drop tree rows from the middle, never the P2P feed at the bottom."""
+    if len(lines) <= height:
+        return lines
+    tail = len(lines) - lines.index(" P2P") if " P2P" in lines else 0
+    head = max(height - tail - 1, 1)
+    return lines[:head] + [" ..."] + lines[len(lines) - (height - head - 1):]
+
+
 def _draw(stdscr, conn) -> None:
     stdscr.erase()
     height, width = stdscr.getmaxyx()
-    for y, line in enumerate(frame(conn, width=width - 1)):
-        if y >= height - 1:
-            break
+    # height - 1: writing the bottom-right cell raises curses.error.
+    for y, line in enumerate(_fit(frame(conn, width=width - 1), height - 1)):
         stdscr.addstr(y, 0, line)
     stdscr.refresh()
 
@@ -138,8 +165,13 @@ def run(conn, interval: float = 1.0) -> None:
     try:
         curses.wrapper(_loop, conn, interval)
     except (curses.error, RuntimeError):
-        while True:  # last resort: the old reprint loop
-            print("\033[2J\033[H" + "\n".join(frame(conn)), flush=True)
-            time.sleep(interval)
+        try:
+            while True:  # last resort: the old reprint loop
+                width = shutil.get_terminal_size((100, 24)).columns
+                print("\033[2J\033[H" + "\n".join(frame(conn, width=width)),
+                      flush=True)
+                time.sleep(interval)
+        except KeyboardInterrupt:
+            pass
     except KeyboardInterrupt:
         pass

@@ -384,7 +384,8 @@ def main() -> None:
     m.add_argument("--self", dest="self_id")
     m.set_defaults(fn=cmd_msg)
 
-    d = with_db(sub.add_parser("dashboard", help="polling status/message view"))
+    d = with_db(sub.add_parser("dashboard",
+                               help="curses DAG + P2P view (q quits, r redraws)"))
     d.add_argument("--interval", type=float, default=1.0)
     d.set_defaults(fn=cmd_dashboard)
 
