@@ -151,10 +151,9 @@ def cmd_submit_feature(args) -> None:
             test_command=args.test_command, max_attempts=args.max_attempts)
     finally:
         conn.close()
-    t = p["tasks"]
-    print(f"feature '{args.name}' queued: worktree={t['worktree']} "
-          f"scout={t['scout']} builder={t['builder']} fixer={t['fixer']} "
-          f"cleanup={t['cleanup']}")
+    # Built from the keys actually present: the tiers have different shapes.
+    nodes = " ".join(f"{k}={v}" for k, v in p["tasks"].items())
+    print(f"feature '{args.name}' queued: {nodes}")
 
 
 def cmd_supervise(args) -> None:

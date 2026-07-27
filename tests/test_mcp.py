@@ -36,7 +36,8 @@ def test_tools_list_exposes_canonical_tools():
     names = {t["name"] for t in r["result"]["tools"]}
     assert names == {"silicorism_plan_and_submit", "silicorism_get_status",
                      "silicorism_start_workers", "silicorism_gc",
-                     "silicorism_verify_and_continue", "silicorism_list_skills"}
+                     "silicorism_verify_and_continue", "silicorism_list_skills",
+                     "silicorism_wait"}
     # every tool advertises an inputSchema (no handler leakage)
     for t in r["result"]["tools"]:
         assert set(t) == {"name", "description", "inputSchema"}
@@ -121,7 +122,7 @@ def test_end_to_end_stdio_handshake(tmp_path):
     # initialize + tools/list responses; the notification produced none
     assert len(lines) == 2
     assert lines[0]["result"]["serverInfo"]["name"] == "silicorism"
-    assert len(lines[1]["result"]["tools"]) == 6
+    assert len(lines[1]["result"]["tools"]) == 7
 
 
 def test_list_skills_tool(tmp_path):
@@ -132,3 +133,30 @@ def test_list_skills_tool(tmp_path):
                                "arguments": {"cwd": str(tmp_path)}}})
     inv = json.loads(r["result"]["content"][0]["text"])
     assert any(s["name"] == "review" and s["harness"] == "claude" for s in inv)
+
+
+def test_tools_list_includes_wait_and_complexity():
+    r = mcp.handle({"jsonrpc": "2.0", "id": 9, "method": "tools/list", "params": {}})
+    names = {t["name"] for t in r["result"]["tools"]}
+    assert "silicorism_wait" in names
+    submit = next(t for t in r["result"]["tools"]
+                  if t["name"] == "silicorism_plan_and_submit")
+    assert "complexity" in submit["inputSchema"]["properties"]
+
+
+def test_simple_complexity_submits_one_agent(tmp_path):
+    dbp = str(tmp_path / "simple.db")
+    r = mcp.handle({"jsonrpc": "2.0", "id": 10, "method": "tools/call",
+                    "params": {"name": "silicorism_plan_and_submit",
+                               "arguments": {"prompt": "build a python game",
+                                             "complexity": "simple",
+                                             "cwd": str(tmp_path),
+                                             "db": dbp, "workers": 0}}})
+    payload = json.loads(r["result"]["content"][0]["text"])
+    assert list(payload["tasks"]) == ["solo"]
+    assert payload["worktree_path"] == str(tmp_path)  # cwd reached the builder
+
+
+def test_instructions_forbid_polling_and_claude_execution():
+    assert "DO NOT POLL" in mcp.INSTRUCTIONS
+    assert "Never assign a Claude model" in mcp.INSTRUCTIONS

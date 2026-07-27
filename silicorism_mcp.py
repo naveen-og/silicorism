@@ -38,14 +38,23 @@ INSTRUCTIONS = (
     "and present a plan with (a) selected route + trade-off rationale, (b) the DAG "
     "nodes with their skill assignments, and (c) each node's model, harness, and "
     "thinking level. Bind discovered skills to the nodes that need them.\n"
-    "4. SUBMIT: call silicorism_plan_and_submit with `nodes` (the custom DAG). It "
-    "auto-starts native tmux-pane workers. Tell the user to watch with "
-    "`tmux attach -t silicorism-session`.\n"
-    "5. VERIFY & LOOP: poll silicorism_get_status / silicorism_verify_and_continue. "
-    "If not satisfied, inspect the failed task artifacts, formulate a corrective "
-    "DAG, and resubmit until every requirement and test gate is 100% met.\n"
-    "Models are opencode free tier (unlimited): use friendly names deepseek-v4-flash, "
-    "nemotron-3-ultra, hy3, mimo-2.5, north-mini-code with thinking=high."
+    "4. SUBMIT: call silicorism_plan_and_submit with `nodes` (a custom DAG) or "
+    "with `prompt` + `complexity` (simple | standard | complex). Size the tier to "
+    "the request: a small self-contained program is `simple` (ONE agent, no "
+    "worktree), not three. It auto-starts native tmux-pane workers. Tell the user "
+    "to watch with `tmux attach -t silicorism-session`.\n"
+    "5. WAIT, DO NOT POLL: call silicorism_wait once. It blocks until the queue "
+    "settles and returns the verdict. Polling silicorism_get_status in a loop "
+    "burns a full turn per poll for no information.\n"
+    "6. VERIFY & LOOP: if not satisfied, inspect the failed tasks' artifacts and "
+    "errors, formulate a corrective DAG, and resubmit until every requirement and "
+    "test gate is met.\n"
+    "Spend your reasoning at plan time: each node's prompt must carry explicit "
+    "acceptance criteria and file-level scope, because the executing models are "
+    "smaller than you and fail on underspecified instructions.\n"
+    "Execution models are the bedrock OSS trio with thinking=high: "
+    "qwen3-coder-480b (build), kimi-k2.5 (review/fix), glm-5 (reason/scout). "
+    "Never assign a Claude model to an execution node."
 )
 HERE = os.path.dirname(os.path.abspath(__file__))
 CLI = os.path.join(HERE, "cli.py")
@@ -94,8 +103,12 @@ def _plan_and_submit(args: dict) -> str:
             out = silicorism_tools.build_pipeline(
                 conn, dbp, args.get("name") or _slug(args["prompt"]), args["prompt"],
                 base=args.get("base") or "main",
-                test_command=args.get("test_command") or "pytest -q",
-                max_attempts=int(args.get("max_attempts") or 3))
+                test_command=args.get("test_command"),
+                max_attempts=int(args.get("max_attempts") or 3),
+                complexity=args.get("complexity") or "standard",
+                # `simple` runs with no worktree, so cwd decides where an agent
+                # writes; without this it would inherit the server's directory.
+                cwd=args.get("cwd"))
             out["mode"] = "pipeline"
         else:
             raise ValueError("provide either 'nodes' (custom DAG) or 'prompt'")
@@ -139,6 +152,22 @@ def _get_status(args: dict) -> str:
     conn = db.connect(dbp)
     try:
         return json.dumps(silicorism_tools.get_status(conn))
+    finally:
+        conn.close()
+
+
+def _wait(args: dict) -> str:
+    """Block until the queue settles, then return the verdict once.
+
+    One call replaces a poll loop: every poll would otherwise be a full
+    orchestrator turn that learns nothing but "still running".
+    """
+    dbp = _db(args)
+    db.init_db(dbp)
+    conn = db.connect(dbp)
+    try:
+        return json.dumps(silicorism_tools.wait_for_settle(
+            conn, timeout_s=float(args.get("timeout_s") or 600)))
     finally:
         conn.close()
 
@@ -201,7 +230,17 @@ TOOLS = [
                     },
                 },
                 "prompt": {"type": "string",
-                           "description": "Fallback: default 5-task pipeline goal"},
+                           "description": "Fallback: goal for a built-in tier"},
+                "complexity": {
+                    "type": "string",
+                    "enum": ["simple", "standard", "complex"],
+                    "description": "Sizes the DAG. simple = one agent in cwd, "
+                                   "no worktree (a small self-contained "
+                                   "program). standard = scout/builder/fixer "
+                                   "in a worktree. complex = parallel builders "
+                                   "in separate worktrees plus an integrator. "
+                                   "Defaults to standard.",
+                },
                 "name": {"type": "string", "description": "Feature/branch name; when "
                          "set the DAG runs in a git worktree"},
                 "base": {"type": "string", "description": "Base branch"},
@@ -261,6 +300,21 @@ TOOLS = [
             },
         },
         "handler": _get_status,
+    },
+    {
+        "name": "silicorism_wait",
+        "description": "Block until the queue settles (all tasks terminal, or "
+                       "any task failed), then return the verdict once. Use "
+                       "this instead of polling silicorism_get_status.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "db": {"type": "string"},
+                "timeout_s": {"type": "number",
+                              "description": "Max seconds to block (cap 3600)."},
+            },
+        },
+        "handler": _wait,
     },
     {
         "name": "silicorism_start_workers",

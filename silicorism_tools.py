@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 
 import db
 import handlers
@@ -44,12 +45,14 @@ def _build_standard(conn, db_path, name, prompt, *, base="main",
                      worktree_path=path)
     t2 = db.add_task(conn, "pi", json.dumps({
         "model": DEFAULT_MODELS["scout"], "thinking": DEFAULT_THINKING,
-        "cwd": path, "p2p": True, "agent_id": f"scout-{name}",
+        # db is what makes p2p real: without it native_command emits no
+        # silicorism-msg prelude and the agent is told to use a tool it lacks.
+        "cwd": path, "p2p": True, "agent_id": f"scout-{name}", "db": db_path,
         "prompt": f"Scout the repo for: {prompt}. Write CONTEXT.md.",
     }), depends_on=t1, worktree_path=path)
     t3 = db.add_task(conn, "pi", json.dumps({
         "model": DEFAULT_MODELS["builder"], "thinking": DEFAULT_THINKING,
-        "cwd": path, "p2p": True, "agent_id": f"builder-{name}",
+        "cwd": path, "p2p": True, "agent_id": f"builder-{name}", "db": db_path,
         "prompt": f"Builder: implement using the context. {prompt}",
     }), depends_on=t2, worktree_path=path)
     t4 = db.add_task(conn, "fixer_loop", json.dumps({
@@ -326,6 +329,28 @@ def verify_status(conn) -> dict:
     }
 
 
+WAIT_CAP_S = 3600.0
+
+
+def wait_for_settle(conn, *, timeout_s=600.0, poll=1.0, stop=None) -> dict:
+    """Block until the queue settles, then return the verdict once.
+
+    Settled = nothing pending or processing, OR at least one task has failed
+    (waiting out a doomed run costs the orchestrator a turn for nothing). This
+    replaces the poll loop: one Claude turn per DAG instead of one per poll.
+    """
+    deadline = time.monotonic() + min(max(float(timeout_s), 1.0), WAIT_CAP_S)
+    while True:
+        verdict = verify_status(conn)
+        if verdict["active"] == 0 or verdict["failures"]:
+            verdict["settled"] = True
+            return verdict
+        if (stop and stop()) or time.monotonic() >= deadline:
+            verdict["settled"] = False
+            return verdict
+        time.sleep(poll)
+
+
 def gc_worktrees(conn, db_path, *, failed=False) -> dict:
     """Reclaim worktrees whose tasks are done. `failed` also clears quarantined.
 
@@ -366,8 +391,10 @@ def get_status(conn) -> dict:
         "satisfied": verdict["satisfied"],
         "failures": verdict["failures"],
         "agents": [dict(h) for h in db.heartbeats(conn)],
-        "messages": [dict(m) for m in db.recent_messages(conn, 20)],
-        "logs": [dict(r) for r in db.recent_logs(conn, 20)],
+        # Trimmed hard: every row here is orchestrator context the user pays
+        # for, and a successful task's artifact tells the planner nothing.
+        "messages": [dict(m) for m in db.recent_messages(conn, 5)],
+        "logs": [dict(r) for r in db.recent_logs(conn, 5)],
         "worktrees": [dict(w) for w in db.worktrees(conn)],
     }
 

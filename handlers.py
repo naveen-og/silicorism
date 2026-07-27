@@ -42,7 +42,7 @@ MODEL_ALIASES = {
 }
 
 # Retry escalation: each failed attempt bumps a pi task to the next stronger
-# model. Terminal rung = claude opus (orchestrator-grade) for the last retry.
+# model. OSS-only by design — a retry must never silently bill Claude tokens.
 ESCALATION = [
     "bedrock-mantle/qwen.qwen3-coder-480b-a35b-instruct",
     "bedrock-mantle/moonshotai.kimi-k2.5",
