@@ -1,8 +1,9 @@
-"""tmux supervisor: a live session with a dashboard window plus one window per
-running task, streaming the agent's stdout/stderr in real time.
+"""tmux supervisor: a live session with a dashboard window plus an `agents`
+window where every running agent gets a tiled pane of its own.
 
-Pure stdlib — every tmux action is a subprocess call, so the command strings
-are unit-testable without a running server.
+The agent owns its pane's tty, so it renders its real TUI; tmux mirrors the
+pane into a per-task log. Pure stdlib — every tmux action is a subprocess call,
+so the command strings are unit-testable without a running server.
 """
 
 from __future__ import annotations
@@ -17,7 +18,11 @@ import tempfile
 import time
 
 SESSION = "silicorism-session"
-SENTINEL_DIR = os.path.join(tempfile.gettempdir(), "silicorism-sentinels")
+# Per-user: the launch scripts here are executed by the user's shell, so a
+# shared /tmp/silicorism-sentinels would let anyone pre-create it and choose
+# what runs.
+SENTINEL_DIR = os.path.join(tempfile.gettempdir(),
+                            f"silicorism-sentinels-{os.getuid()}")
 CONFIG_DIR = os.path.expanduser("~/.config/silicorism")
 LOG_DIR = os.path.join(CONFIG_DIR, "logs")
 
@@ -28,13 +33,21 @@ def log_path(task_id) -> str:
     return os.path.join(LOG_DIR, f"task-{task_id}.log")
 
 
+_ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b[@-Z\\-_]|\r")
+
+
 def read_log_tail(path: str, max_chars: int = 2000) -> str:
-    """Return the tail of a captured log for artifact hand-off (empty if none)."""
+    """Tail of a captured log, escape codes stripped (empty if none).
+
+    tmux records what the pane *drew*, so the raw file is a repaint stream.
+    Handing that to the next agent as context would spend its tokens on colour
+    codes.
+    """
     try:
         data = open(path, encoding="utf-8", errors="replace").read()
     except OSError:
         return ""
-    return data[-max_chars:].strip()
+    return _ANSI.sub("", data)[-max_chars:].strip()
 
 
 def _tmux(*args: str) -> subprocess.CompletedProcess:
@@ -77,15 +90,45 @@ def mark_done(task_id, *, session: str = SESSION, failed: bool = False) -> None:
     _tmux("rename-window", "-t", _window_target(session, name), f"{name}-{suffix}")
 
 
+def mark_window_done(name: str, *, session: str = SESSION,
+                     failed: bool = False) -> None:
+    """Rename a finished task's window; the caller knows its actual name."""
+    suffix = "failed" if failed else "done"
+    _tmux("rename-window", "-t", _window_target(session, name), f"{name}-{suffix}")
+
+
+def trim_log(path: str, max_bytes: int = 262_144) -> None:
+    """Keep only the tail of a pane log.
+
+    pipe-pane records every repaint, so a half-minute agent can leave megabytes
+    behind; the tail is the only part anything reads.
+    """
+    try:
+        if os.path.getsize(path) <= max_bytes:
+            return
+        with open(path, "rb") as fh:
+            fh.seek(-max_bytes, os.SEEK_END)
+            tail = fh.read()
+        with open(path, "wb") as fh:
+            fh.write(tail)
+    except OSError:
+        pass
+
+
 def kill_session(session: str = SESSION) -> None:
     _tmux("kill-session", "-t", session)
 
 
 # --- native CLI execution in a live pane -----------------------------------
 
+def _sentinel_dir() -> str:
+    """Create the sentinel/script dir private to this user (0700)."""
+    os.makedirs(SENTINEL_DIR, mode=0o700, exist_ok=True)
+    return SENTINEL_DIR
+
+
 def sentinel_path(task_id) -> str:
-    os.makedirs(SENTINEL_DIR, exist_ok=True)
-    return os.path.join(SENTINEL_DIR, f"task-{task_id}.exit")
+    return os.path.join(_sentinel_dir(), f"task-{task_id}.exit")
 
 
 def _launch_script(task_id, command: str, sentinel: str) -> str:
@@ -103,8 +146,7 @@ def _launch_script(task_id, command: str, sentinel: str) -> str:
     instead of a live agent. Logging is tmux's job now (see _log_pane).
     The sentinel is written atomically via mv.
     """
-    os.makedirs(SENTINEL_DIR, exist_ok=True)
-    path = os.path.join(SENTINEL_DIR, f"task-{task_id}.sh")
+    path = os.path.join(_sentinel_dir(), f"task-{task_id}.sh")
     tmp = shlex.quote(sentinel + ".tmp")
     fin = shlex.quote(sentinel)
     with open(path, "w", encoding="utf-8") as fh:
@@ -144,7 +186,10 @@ def run_task_in_pane(task_id, task_type: str, cwd: str, command: str,
 # --- agents grid ------------------------------------------------------------
 
 GRID_WINDOW = "agents"
-GRID_MAX = int(os.environ.get("SILICORISM_GRID_MAX") or 4)
+try:
+    GRID_MAX = int(os.environ.get("SILICORISM_GRID_MAX") or 4)
+except ValueError:  # a typo in an env var must not break every import
+    GRID_MAX = 4
 RUNNING, DONE, FAILED = "RUNNING", "DONE", "FAILED"
 _MARKERS = (RUNNING, DONE, FAILED)
 # Pane border doubles as the label bar: "<agent-id> <status>". The label lives
@@ -160,8 +205,7 @@ _GRID_RE = re.compile(rf"^{re.escape(GRID_WINDOW)}(?:-(\d+))?$")
 @contextlib.contextmanager
 def _grid_lock():
     """Cross-process lock around pane placement (flock, released on close)."""
-    os.makedirs(SENTINEL_DIR, exist_ok=True)
-    fh = open(os.path.join(SENTINEL_DIR, "grid.lock"), "w")
+    fh = open(os.path.join(_sentinel_dir(), "grid.lock"), "w")
     try:
         fcntl.flock(fh, fcntl.LOCK_EX)
         yield
@@ -174,7 +218,9 @@ def _grid_windows(session: str) -> list[str]:
     r = _tmux("list-windows", "-t", session, "-F", "#{window_name}")
     if r.returncode != 0:
         return []
-    return [n for n in r.stdout.split() if _GRID_RE.match(n)]
+    # splitlines, not split: a user window named "my agents" would otherwise
+    # yield a phantom "agents" that passes the exact-match test.
+    return [n for n in r.stdout.splitlines() if _GRID_RE.match(n)]
 
 
 def _pane_count(session: str, window: str) -> int:

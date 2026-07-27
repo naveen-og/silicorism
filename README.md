@@ -17,8 +17,9 @@ stays readable — the fifth agent opens `agents-2`.
 
 ![The dashboard window](docs/images/dashboard.png)
 
-Window 0 is the dashboard: the DAG as a tree, each node's model, how long it has
-been running, and which pane it is in. `q` quits, `r` redraws.
+The `dashboard` window shows the DAG as a tree: each node's model (or, for a
+gate node, its test command), how long it has been running, and which pane it is
+in. `q` quits, `r` redraws.
 
 ## Layout
 | File | Role |
@@ -79,8 +80,8 @@ loop**. `silicorism_list_skills` inventories skills (name/harness/scope/descript
 so they can be bound to DAG nodes during planning.
 
 **Orchestrator loop.** `silicorism_plan_and_submit` submits a plan **and
-auto-starts native-pane workers** in one call. Pass `prompt` for the default
-5-task pipeline, or `nodes` for a custom DAG you design — each node sets its own
+auto-starts native-pane workers** in one call. Pass `prompt` plus a
+`complexity` tier, or `nodes` for a custom DAG you design — each node sets its own
 `id`, `prompt`, `depends_on`, `harness` (`pi`/`claude`), `model`, `thinking`
 (`high`…), and `skills`. `silicorism_get_status` returns a `satisfied` verdict
 plus each failed task's artifact + last error; `silicorism_verify_and_continue`

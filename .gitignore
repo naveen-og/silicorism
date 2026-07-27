@@ -9,3 +9,4 @@ orch.db
 *.egg-info/
 build/
 dist/
+.claude/settings.local.json

@@ -80,6 +80,10 @@ def _place_pane(conn, task, command: str, sentinel: str, logfile: str):
     except Exception:  # noqa: BLE001 - the grid is a viewport, never a dependency
         window = tmux.run_task_in_pane(tid, task["task_type"], cwd, command,
                                        sentinel, logfile=logfile)
+        try:  # a retry after a grid run would otherwise keep the closed pane
+            db.set_pane_target(conn, tid, window)
+        except Exception:  # noqa: BLE001
+            pass
         return window, None
     # Recorded only after the launch succeeded: a failed write here must not
     # re-enter the fallback, which would start a second agent for one task.
@@ -90,13 +94,13 @@ def _place_pane(conn, task, command: str, sentinel: str, logfile: str):
     return window, pane
 
 
-def _mark_pane(task_id, pane, *, failed: bool) -> None:
+def _mark_pane(task_id, pane, *, failed: bool, window=None) -> None:
     """Retitle the grid pane, or the legacy window when there is no pane id."""
     try:
         if pane:
             tmux.mark_pane_done(pane, failed=failed)
-        else:
-            tmux.mark_done(task_id, failed=failed)
+        elif window:  # run_task_in_pane names it task-<id>-<type>, not task-<id>
+            tmux.mark_window_done(window, failed=failed)
     except Exception:  # noqa: BLE001
         pass
 
@@ -120,11 +124,13 @@ def _run_native(conn, task, agent_id, command: str) -> None:
                     or tmux.read_log_tail(logf)
                     or f"native pane {win} exit 0")
         db.complete_task(conn, tid, artifact=artifact)
+        # pipe-pane records every repaint; four agents left 13 MB behind once.
+        tmux.trim_log(logf)
         db.log(conn, tid, agent_id, f"completed (native): {win}")
     except Exception:
-        _mark_pane(tid, pane, failed=True)
+        _mark_pane(tid, pane, failed=True, window=win)
         raise
-    _mark_pane(tid, pane, failed=False)
+    _mark_pane(tid, pane, failed=False, window=win)
 
 
 def _open_task_window(db_path, task) -> None:

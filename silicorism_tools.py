@@ -338,7 +338,9 @@ def verify_status(conn) -> dict:
     """
     counts = db.counts(conn)
     blocked = _dead_task_ids(db.all_tasks(conn))
-    active = counts["pending"] + counts["processing"] - len(blocked)
+    # counts and all_tasks are separate reads; a row inserted between them
+    # must not drive this negative and hide "nothing left to do".
+    active = max(counts["pending"] + counts["processing"] - len(blocked), 0)
     failures = []
     for r in conn.execute(
             "SELECT id, task_type, output_artifact FROM tasks "

@@ -142,7 +142,8 @@ def cmd_status(args) -> None:
 
 
 def cmd_submit_feature(args) -> None:
-    """Enqueue a 5-task DAG: worktree -> scout -> builder -> fixer -> cleanup."""
+    """Enqueue the standard DAG: worktree -> scout -> builder -> fixer ->
+    verify -> cleanup."""
     db.init_db(args.db)
     conn = db.connect(args.db)
     try:

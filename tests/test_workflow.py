@@ -375,7 +375,8 @@ def test_worker_native_completes_and_fails(mock_tmux, tmp_path):
     mock_tmux.wait_for_exit.return_value = 0
     worker._run_native(conn, task, "w0", "pi -p 'x'")
     assert db.counts(conn)["completed"] == 1
-    mock_tmux.mark_done.assert_called_with(tid, failed=False)
+    # fallback window is named task-<id>-<type>, so it must be renamed by name
+    mock_tmux.mark_window_done.assert_called_with("task-1-pi", failed=False)
     # captured log tail becomes the artifact for downstream deps
     art = conn.execute("SELECT output_artifact FROM tasks WHERE id=?",
                        (tid,)).fetchone()["output_artifact"]

@@ -182,7 +182,7 @@ def test_worker_falls_back_to_a_window_when_the_grid_fails(tmp_path):
     assert legacy.call_count == 1
     stored = conn.execute("SELECT pane_target FROM tasks WHERE id=?",
                           (tid,)).fetchone()["pane_target"]
-    assert stored is None
+    assert stored == "task-1-pi"  # the window, since there is no pane
     conn.close()
 
 
@@ -260,3 +260,32 @@ def test_pane_placement_is_serialised_across_processes():
     assert order == ["enter", "exit"] * 4, order
     for i in range(4):
         os.remove(os.path.join(tmux.SENTINEL_DIR, f"task-{i}.sh"))
+
+
+def test_a_user_window_named_my_agents_is_not_seen_as_the_grid():
+    """list-windows output is line-oriented; splitting on spaces invents windows."""
+    fake = FakeTmux(existing=["dashboard", "my agents", "notes"])
+    assert tmux._grid_windows("s") == []
+
+
+def test_log_tails_are_stripped_of_escape_codes(tmp_path):
+    """tmux logs what the pane drew, so the raw file is a repaint stream."""
+    log = tmp_path / "t.log"
+    log.write_text("\x1b[38;2;108;113;196m─\x1b[39m CONTEXT.md written\r\n")
+    assert tmux.read_log_tail(str(log)) == "─ CONTEXT.md written"
+
+
+def test_trim_log_keeps_the_tail(tmp_path):
+    log = tmp_path / "big.log"
+    log.write_text("x" * 5000 + "END")
+    tmux.trim_log(str(log), max_bytes=1000)
+    body = log.read_text()
+    assert len(body) == 1000 and body.endswith("END")
+
+
+def test_the_script_directory_is_private_to_this_user():
+    """The shell executes these scripts; a shared /tmp dir is a foothold."""
+    import stat
+    d = tmux._sentinel_dir()
+    assert str(os.getuid()) in d
+    assert stat.S_IMODE(os.stat(d).st_mode) & 0o077 == 0

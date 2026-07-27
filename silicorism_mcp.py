@@ -319,7 +319,8 @@ TOOLS = [
             "properties": {
                 "db": {"type": "string"},
                 "timeout_s": {"type": "number",
-                              "description": "Max seconds to block (cap 3600)."},
+                              "description": "Max seconds to block (cap "
+                                             f"{int(silicorism_tools.WAIT_CAP_S)})."},
             },
         },
         "handler": _wait,

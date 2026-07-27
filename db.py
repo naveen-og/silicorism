@@ -122,19 +122,47 @@ _MIGRATIONS = (
 )
 
 
+def _retry_busy(fn, *, attempts: int = 8, base: float = 0.02):
+    """Call fn(), retrying SQLITE_BUSY with the same backoff immediate() uses."""
+    for i in range(attempts):
+        try:
+            return fn()
+        except sqlite3.OperationalError as err:
+            if not _is_busy(err) or i == attempts - 1:
+                raise
+            time.sleep(base * (2 ** i) + random.random() * base)
+
+
 def _migrate(conn: sqlite3.Connection) -> None:
     have = {r["name"] for r in conn.execute("PRAGMA table_info(tasks)")}
     for col, typ in _MIGRATIONS:
-        if col not in have:
+        if col in have:
+            continue
+        try:
             conn.execute(f"ALTER TABLE tasks ADD COLUMN {col} {typ}")
+        except sqlite3.OperationalError as err:
+            # A racing process added it between our read and our write; that is
+            # the outcome we wanted either way.
+            if "duplicate column" not in str(err).lower():
+                raise
 
 
 def init_db(db_path: str | Path) -> None:
+    """Create or migrate the schema. Safe to call from several processes at once.
+
+    Every MCP tool call starts with this, so the DDL has to serialise like the
+    rest of the writes — otherwise two workers ALTER the same column and one of
+    them dies with "duplicate column name".
+    """
     Path(db_path).parent.mkdir(parents=True, exist_ok=True)
     conn = connect(db_path)
     try:
-        conn.executescript(_SCHEMA)
-        _migrate(conn)
+        # executescript commits any open transaction, so it cannot run inside
+        # immediate(); every statement in _SCHEMA is IF NOT EXISTS, so the only
+        # concurrent failure mode is the DDL lock, which is worth retrying.
+        _retry_busy(lambda: conn.executescript(_SCHEMA))
+        with immediate(conn) as c:
+            _migrate(c)
     finally:
         conn.close()
 
