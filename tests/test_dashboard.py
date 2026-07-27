@@ -132,3 +132,16 @@ def test_the_p2p_feed_survives_a_short_terminal():
     assert len(fitted) == 10
     assert fitted[-1] == "  a->b: hi" and " P2P" in fitted
     assert " ..." in fitted
+
+
+def test_nodes_are_named_by_their_agent():
+    """Four rows all reading 'pi' say nothing about which node is which."""
+    tasks = [_row(1, "pi", "processing",
+                  payload=json.dumps({"agent_id": "scout-taskboard"})),
+             _row(2, "verify", "pending")]
+    frame = dashboard.build_frame(tasks, [], {"pending": 1, "processing": 1,
+                                              "completed": 0, "failed": 0},
+                                  now=NOW)
+    text = "\n".join(frame)
+    assert "scout-taskboard" in text
+    assert "verify" in text  # falls back to the task type

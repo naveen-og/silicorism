@@ -49,6 +49,20 @@ def short_model(payload) -> str:
     return _SHORT.get(model, model).split("/")[-1][:18]
 
 
+def node_name(row) -> str:
+    """The agent id if the payload names one, else the task type.
+
+    Four rows all reading `pi` tell you nothing about which node is which.
+    """
+    try:
+        data = json.loads(row["payload"] or "{}")
+    except (json.JSONDecodeError, ValueError, TypeError):
+        return str(row["task_type"])
+    if isinstance(data, dict) and data.get("agent_id"):
+        return str(data["agent_id"])
+    return str(row["task_type"])
+
+
 def elapsed(row, now) -> str:
     """m'ss for a task that has started; '-' for one that has not."""
     start = _parse_ts(row["started_at"])
@@ -91,7 +105,7 @@ def build_frame(tasks, messages, counts, *, width=100, now=None) -> list[str]:
     def row_line(row, depth):
         prefix = "  " * depth + ("+-" if depth else "")
         status = _STATUS.get(row["status"], row["status"])
-        return (f" {prefix}[{status}] {row['task_type']:<16} "
+        return (f" {prefix}[{status}] {node_name(row):<20} "
                 f"{short_model(row['payload']):<18} "
                 f"{elapsed(row, now):>6}  {row['pane_target'] or ''}")
 

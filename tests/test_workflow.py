@@ -339,7 +339,13 @@ def test_run_task_in_pane_captures_exit(run, tmp_path):
     name = tmux.run_task_in_pane(1, "pi", "/w", "pi -p 'x'", sent)
     assert name == "task-1-pi"
     sends = [c.args[0] for c in run.call_args_list if "send-keys" in c.args[0]]
-    assert any("echo $? >" in " ".join(s) for s in sends), sends
+    # the shell is handed a script path, never the command itself
+    script = [s[-2].split()[-1] for s in sends if s[-2].endswith(".sh")]
+    assert script, sends
+    body = Path(script[0]).read_text()
+    assert "echo $? >" in body and "| tee " not in body, body
+    assert any("pipe-pane" in " ".join(c.args[0]) for c in run.call_args_list)
+    Path(script[0]).unlink()
 
 
 def test_wait_for_exit_reads_sentinel(tmp_path):

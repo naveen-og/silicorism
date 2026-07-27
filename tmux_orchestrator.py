@@ -7,6 +7,8 @@ are unit-testable without a running server.
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import os
 import re
 import shlex
@@ -86,16 +88,44 @@ def sentinel_path(task_id) -> str:
     return os.path.join(SENTINEL_DIR, f"task-{task_id}.exit")
 
 
+def _launch_script(task_id, command: str, sentinel: str) -> str:
+    """Write the command to a script and return the `sh <path>` that runs it.
+
+    Two things this indirection buys:
+
+    send-keys replays a string as keystrokes, so a newline inside the command
+    is an Enter — an agent prompt spanning lines left the shell stuck in quote
+    continuation and the TUI never started. `sh <script>` is one line whatever
+    the prompt contains.
+
+    Nothing is piped. Piping the agent through `tee` made its stdout a pipe,
+    so pi dropped its TUI and printed plain text: the panes showed output
+    instead of a live agent. Logging is tmux's job now (see _log_pane).
+    The sentinel is written atomically via mv.
+    """
+    os.makedirs(SENTINEL_DIR, exist_ok=True)
+    path = os.path.join(SENTINEL_DIR, f"task-{task_id}.sh")
+    tmp = shlex.quote(sentinel + ".tmp")
+    fin = shlex.quote(sentinel)
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(f"{command}\necho $? > {tmp}\nmv {tmp} {fin}\n")
+    return f"sh {shlex.quote(path)}"
+
+
+def _log_pane(target: str, logfile: str) -> None:
+    """Mirror everything the pane displays into <logfile>, leaving it a tty."""
+    _tmux("pipe-pane", "-o", "-t", target, f"cat >> {shlex.quote(logfile)}")
+
+
 def run_task_in_pane(task_id, task_type: str, cwd: str, command: str,
                      sentinel: str, *, session: str = SESSION,
                      logfile: str | None = None) -> str:
     """Open task-<id>-<type> at <cwd> and run <command> live, capturing exit.
 
-    stdout+stderr both stream live to the pane AND tee to <logfile> so the
-    worker can read a rich artifact for downstream tasks. The command's own
-    exit code (not tee's) is written atomically to <sentinel> for polling;
-    remain-on-exit keeps the pane open for post-mortem inspection.
-    Returns the window name.
+    The agent owns the pane's tty; tmux mirrors what it draws into <logfile>
+    so the worker still has a rich artifact for downstream tasks. The exit
+    code is written atomically to <sentinel> for polling; remain-on-exit keeps
+    the pane open for post-mortem inspection. Returns the window name.
     """
     name = f"task-{task_id}-{task_type}"
     if os.path.exists(sentinel):
@@ -105,12 +135,9 @@ def run_task_in_pane(task_id, task_type: str, cwd: str, command: str,
     _tmux("new-window", "-t", session, "-n", name, "-c", cwd)
     target = _window_target(session, name)
     _tmux("set-option", "-t", target, "remain-on-exit", "on")
-    tmp = shlex.quote(sentinel + ".tmp")
-    fin = shlex.quote(sentinel)
-    log = shlex.quote(logfile)
-    # brace group's exit ($?) captured before the pipe, so tee doesn't mask it.
-    wrapped = f"{{ {command}; echo $? > {tmp}; }} 2>&1 | tee {log}; mv {tmp} {fin}"
-    _tmux("send-keys", "-t", target, wrapped, "Enter")
+    _log_pane(target, logfile)
+    _tmux("send-keys", "-t", target,
+          _launch_script(task_id, command, sentinel), "Enter")
     return name
 
 
@@ -120,11 +147,26 @@ GRID_WINDOW = "agents"
 GRID_MAX = int(os.environ.get("SILICORISM_GRID_MAX") or 4)
 RUNNING, DONE, FAILED = "RUNNING", "DONE", "FAILED"
 _MARKERS = (RUNNING, DONE, FAILED)
-# Pane border doubles as the label bar: "<agent-id> <status>".
-PANE_FORMAT = "#[align=left] #{pane_title} "
+# Pane border doubles as the label bar: "<agent-id> <status>". The label lives
+# in a tmux user option, not pane_title — pi retitles its own pane, which would
+# wipe the agent id out of the border seconds after the agent starts.
+LABEL_OPT = "@silicorism_label"
+PANE_FORMAT = f"#[align=left] #{{{LABEL_OPT}}} "
 # Exact grid window names only: "agents" or "agents-<N>" — never a user's own
 # "agents-notes" or similar, which would otherwise get agent panes spilled into it.
 _GRID_RE = re.compile(rf"^{re.escape(GRID_WINDOW)}(?:-(\d+))?$")
+
+
+@contextlib.contextmanager
+def _grid_lock():
+    """Cross-process lock around pane placement (flock, released on close)."""
+    os.makedirs(SENTINEL_DIR, exist_ok=True)
+    fh = open(os.path.join(SENTINEL_DIR, "grid.lock"), "w")
+    try:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        yield
+    finally:
+        fh.close()
 
 
 def _grid_windows(session: str) -> list[str]:
@@ -168,13 +210,17 @@ def grid_pane(task_id, label: str, cwd: str, command: str, sentinel: str, *,
     if logfile is None:
         logfile = log_path(task_id)
     ensure_session(session)
-    window, is_new = _next_grid_window(session)
-    if is_new:
-        r = _tmux("new-window", "-t", session, "-n", window, "-c", cwd,
-                  "-P", "-F", "#{pane_id}")
-    else:
-        r = _tmux("split-window", "-t", f"{session}:{window}", "-c", cwd,
-                  "-P", "-F", "#{pane_id}")
+    # Workers are separate processes racing to place a pane. Choosing a window
+    # and creating it must be one step, or four workers each find "no agents
+    # window" and create four of them (tmux allows duplicate window names).
+    with _grid_lock():
+        window, is_new = _next_grid_window(session)
+        if is_new:
+            r = _tmux("new-window", "-t", session, "-n", window, "-c", cwd,
+                      "-P", "-F", "#{pane_id}")
+        else:
+            r = _tmux("split-window", "-t", f"{session}:{window}", "-c", cwd,
+                      "-P", "-F", "#{pane_id}")
     pane = r.stdout.strip()
     if r.returncode != 0 or not pane:
         raise RuntimeError(f"tmux pane: {r.stderr.strip()[:200] or 'no pane id'}")
@@ -182,22 +228,20 @@ def grid_pane(task_id, label: str, cwd: str, command: str, sentinel: str, *,
     _tmux("set-option", "-w", "-t", target, "pane-border-status", "top")
     _tmux("set-option", "-w", "-t", target, "pane-border-format", PANE_FORMAT)
     _tmux("set-option", "-p", "-t", pane, "remain-on-exit", "on")
-    _tmux("select-pane", "-t", pane, "-T", f"{label} {RUNNING}")
+    _tmux("set-option", "-p", "-t", pane, LABEL_OPT, f"{label} {RUNNING}")
     _tmux("select-layout", "-t", target, "tiled")
-    tmp = shlex.quote(sentinel + ".tmp")
-    fin = shlex.quote(sentinel)
-    log = shlex.quote(logfile)
-    wrapped = f"{{ {command}; echo $? > {tmp}; }} 2>&1 | tee {log}; mv {tmp} {fin}"
-    _tmux("send-keys", "-t", pane, wrapped, "Enter")
+    _log_pane(pane, logfile)
+    _tmux("send-keys", "-t", pane,
+          _launch_script(task_id, command, sentinel), "Enter")
     return window, pane
 
 
 def mark_pane_done(pane_id: str, *, failed: bool = False) -> None:
     """Swap a pane's status marker to DONE/FAILED, keeping its label."""
-    r = _tmux("display-message", "-p", "-t", pane_id, "#{pane_title}")
+    r = _tmux("display-message", "-p", "-t", pane_id, f"#{{{LABEL_OPT}}}")
     title = r.stdout.strip() if r.returncode == 0 else ""
     base = title.rsplit(" ", 1)[0] if title.endswith(_MARKERS) else title
-    _tmux("select-pane", "-t", pane_id, "-T",
+    _tmux("set-option", "-p", "-t", pane_id, LABEL_OPT,
           f"{base} {FAILED if failed else DONE}".strip())
 
 
@@ -270,9 +314,14 @@ if __name__ == "__main__":
     assert any("rename-window" in f and "task-7-done" in f for f in flat), flat
     assert any("new-window -t silicorism-session -n task-9-pi -c /tmp/worktrees/y" in f
                for f in flat), flat
-    assert any("send-keys" in f and "echo $? >" in f for f in flat), flat
-    # stdout/stderr tee'd to a log file for the downstream artifact
-    assert any("| tee " in f and "task-9.log" in f for f in flat), flat
+    # the command goes into a script; send-keys only types `sh <path>`.
+    script = os.path.join(SENTINEL_DIR, "task-9.sh")
+    assert any("send-keys" in f and script in f for f in flat), flat
+    body = open(script, encoding="utf-8").read()
+    assert "echo $? >" in body and "| tee " not in body, body
+    # logging is tmux's job, so the agent keeps a tty and renders its TUI
+    assert any("pipe-pane" in f and "task-9.log" in f for f in flat), flat
+    os.remove(script)
     # log tail is read back as the artifact
     lp = log_path("test")
     open(lp, "w").write("line1\nCONTEXT.md written\n")

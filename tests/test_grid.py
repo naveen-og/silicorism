@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 import sys
+import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -93,21 +95,33 @@ def test_pane_options_and_title_target_the_pane_id():
     (_, pane), = _place(fake, 1)
     flat = fake.flat()
     assert any(f"set-option -p -t {pane} remain-on-exit on" in f for f in flat), flat
-    assert any(f"select-pane -t {pane} -T" in f for f in flat), flat
+    assert any(f"set-option -p -t {pane} {tmux.LABEL_OPT}" in f for f in flat), flat
 
 
-def test_command_wrapper_preserves_exit_code_and_tee():
+def test_the_agent_is_launched_from_a_script_not_typed_into_the_shell():
+    """A prompt spanning lines would be replayed as Enter presses by send-keys,
+    leaving the shell in quote continuation and the TUI never starting."""
     fake = FakeTmux()
-    _place(fake, 1)
+    with patch("subprocess.run", side_effect=fake):
+        tmux.grid_pane(1, "agent-1", "/w", "pi 'line one\nline two'",
+                       "/tmp/sent-1.exit", logfile="/tmp/l.log")
     sent = [f for f in fake.flat() if "send-keys" in f]
-    assert sent and "echo $? >" in sent[0] and "| tee " in sent[0], sent
+    assert sent and "\n" not in sent[0], sent
+    script = sent[0].split()[-2]
+    body = open(script, encoding="utf-8").read()
+    assert "line one\nline two" in body          # prompt survives verbatim
+    assert "echo $? >" in body
+    # never piped: a pipe costs the agent its tty and with it the whole TUI
+    assert "| tee " not in body, body
+    assert any("pipe-pane" in f and "/tmp/l.log" in f for f in fake.flat())
+    os.remove(script)
 
 
 def test_mark_pane_done_swaps_the_status_marker():
     fake = FakeTmux()
     with patch("subprocess.run", side_effect=fake):
         tmux.mark_pane_done("%3", failed=True)
-    title = [f for f in fake.flat() if "select-pane" in f][-1]
+    title = [f for f in fake.flat() if tmux.LABEL_OPT in f][-1]
     assert "%3" in title and tmux.FAILED in title, title
 
 
@@ -213,3 +227,36 @@ def test_worker_records_the_pane_target(tmp_path):
     # the pane's label is the agent id, so the grid reads as a roster of agents
     assert g.call_args[0][1] == "builder-x"
     conn.close()
+
+
+def test_pane_placement_is_serialised_across_processes():
+    """Four workers racing must not each create their own 'agents' window."""
+    import threading
+
+    fake = FakeTmux()
+    order = []
+    real_next = tmux._next_grid_window
+
+    def slow_next(session):
+        order.append("enter")
+        time.sleep(0.02)  # widen the window a racing caller would slip through
+        out = real_next(session)
+        order.append("exit")
+        return out
+
+    with patch("subprocess.run", side_effect=fake), \
+         patch.object(tmux, "_next_grid_window", side_effect=slow_next):
+        threads = [threading.Thread(target=tmux.grid_pane,
+                                    args=(i, f"a{i}", "/w", "pi 'go'",
+                                          f"/tmp/s{i}.exit"),
+                                    kwargs={"logfile": "/tmp/l.log"})
+                   for i in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(10)
+
+    # strictly alternating enter/exit means no two selections overlapped
+    assert order == ["enter", "exit"] * 4, order
+    for i in range(4):
+        os.remove(os.path.join(tmux.SENTINEL_DIR, f"task-{i}.sh"))
