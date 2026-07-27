@@ -116,3 +116,17 @@ def test_complex_cleans_up_both_worktrees_last(tmp_path):
         # worktree (and branch) intact for post-mortem.
         assert json.loads(row["depends_on"])[0] >= t["verify"]
     conn.close()
+
+
+def test_claude_harness_is_coerced_to_pi(tmp_path):
+    """A node asking for the claude harness still runs on pi: execution never
+    bills or routes to a Claude model."""
+    dbp = str(tmp_path / "coerce.db")
+    db.init_db(dbp)
+    conn = db.connect(dbp)
+    st.build_dag(conn, dbp, [
+        {"id": "a", "prompt": "x", "harness": "claude", "model": "glm-5"},
+    ])
+    rows = conn.execute("SELECT task_type FROM tasks").fetchall()
+    assert [r["task_type"] for r in rows] == ["pi"]
+    conn.close()

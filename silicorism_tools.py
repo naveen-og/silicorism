@@ -241,7 +241,7 @@ def _toposort(nodes: list[dict]) -> list[str]:
 def build_dag(conn, db_path, nodes, *, name=None, base="main", cwd=None) -> dict:
     """Submit an arbitrary agent DAG. Each node is a dict:
 
-        {id, prompt, depends_on?, harness?("pi"|"claude"), model?, thinking?,
+        {id, prompt, depends_on?, harness?("pi"|"verify"), model?, thinking?,
          skills?, p2p?}
 
     A node with harness "verify" is a test gate instead of an agent: it takes
@@ -280,7 +280,12 @@ def build_dag(conn, db_path, nodes, *, name=None, base="main", cwd=None) -> dict
         harness = n.get("harness") or "pi"
         if harness not in ("pi", "claude", "verify"):
             raise ValueError(
-                f"node {nid!r}: harness must be 'pi', 'claude' or 'verify'")
+                f"node {nid!r}: harness must be 'pi' or 'verify'")
+        # Execution is pi-only. "claude" is accepted for back-compat and coerced:
+        # the OSS friendly names resolve on the pi branch alone (handlers.py:192),
+        # so a claude node with model "glm-5" dies at CLI startup instead of running.
+        if harness == "claude":
+            harness = "pi"
         deps = [id_map[d] for d in (n.get("depends_on") or [])]
         if wt_task and not deps:
             deps = [wt_task]  # root nodes wait for the worktree to exist
@@ -434,6 +439,20 @@ def gc_worktrees(conn, db_path, *, failed=False) -> dict:
     return {"cleaned": cleaned, "kept": kept}
 
 
+def prune_tasks(conn) -> dict:
+    """Delete completed/failed tasks and their logs. Pending and processing rows
+    are never touched, so a live pipeline cannot be pruned out from under itself.
+    """
+    with db.immediate(conn) as c:
+        ids = [r["id"] for r in c.execute(
+            "SELECT id FROM tasks WHERE status IN ('completed','failed')")]
+        if ids:
+            marks = ",".join("?" * len(ids))
+            c.execute(f"DELETE FROM execution_logs WHERE task_id IN ({marks})", ids)
+            c.execute(f"DELETE FROM tasks WHERE id IN ({marks})", ids)
+    return {"deleted": len(ids)}
+
+
 def get_status(conn) -> dict:
     """Live DAG + P2P snapshot for the orchestrator context.
 
@@ -517,6 +536,8 @@ if __name__ == "__main__":
             {"id": "a", "prompt": "x"},
             {"id": "b", "prompt": "y", "depends_on": ["a"], "harness": "claude"}])
         assert set(dag["nodes"]) == {"a", "b"}
+        assert [r["task_type"] for r in
+                conn.execute("SELECT task_type FROM tasks ORDER BY id")] == ["pi", "pi"]
         assert verify_status(conn)["satisfied"] is False
         try:
             build_dag(conn, dbp2, [{"id": "a", "prompt": "x", "depends_on": ["a"]}])
