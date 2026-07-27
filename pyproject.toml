@@ -20,4 +20,4 @@ silicorism-msg = "cli:msg_main"
 # the console entry points globally; each resolves its DB per-repo (git root's
 # .git/silicorism.db, else ~/.config/silicorism/repos/<slug>/), never from CWD.
 py-modules = ["cli", "db", "handlers", "worker", "silicorism_tools",
-              "tmux_orchestrator", "skills", "silicorism_mcp"]
+              "tmux_orchestrator", "skills", "silicorism_mcp", "dashboard"]

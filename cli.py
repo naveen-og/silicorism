@@ -170,28 +170,13 @@ def cmd_supervise(args) -> None:
           "Run workers with SILICORISM_NATIVE=1 for a live pi/claude pane per task.")
 
 
-def _dashboard_frame(conn) -> str:
-    c = db.counts(conn)
-    lines = ["\033[2J\033[H", "== silicorism supervisor ==",
-             f"tasks  pending={c['pending']}  processing={c['processing']}  "
-             f"completed={c['completed']}  failed={c['failed']}", "",
-             "recent P2P messages:"]
-    msgs = db.recent_messages(conn, 8)
-    if not msgs:
-        lines.append("  (none)")
-    for m in reversed(msgs):
-        body = (m["content"] or "").replace("\n", " ")[:70]
-        lines.append(f"  [{m['status']:<6}] {m['sender_id']}->{m['recipient_id']}: {body}")
-    return "\n".join(lines)
-
-
 def cmd_dashboard(args) -> None:
-    """Polling status + P2P message view (runs inside supervisor window 0)."""
+    """Curses status + DAG + P2P view (runs in the supervisor's window 0)."""
+    import dashboard
+
     conn = db.connect(args.db)
     try:
-        while True:
-            print(_dashboard_frame(conn), flush=True)
-            time.sleep(args.interval)
+        dashboard.run(conn, interval=args.interval)
     except KeyboardInterrupt:
         pass
     finally:
