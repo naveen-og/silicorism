@@ -177,6 +177,20 @@ def test_gc_prunes_terminal_tasks_but_keeps_live_ones(tmp_path):
     assert left == [live]
     conn.close()
 
+def test_prune_keeps_a_completed_task_that_a_pending_task_still_depends_on(tmp_path):
+    """Deleting a completed dependency parks its dependent forever (db.py:236)."""
+    dbp = str(tmp_path / "deadlock.db")
+    db.init_db(dbp)
+    conn = db.connect(dbp)
+    parent = db.add_task(conn, "pi", '{"prompt": "a"}')
+    conn.execute("UPDATE tasks SET status='completed' WHERE id=?", (parent,))
+    conn.commit()
+    child = db.add_task(conn, "pi", '{"prompt": "b"}', depends_on=[parent])
+    assert silicorism_tools.prune_tasks(conn) == {"deleted": 0}
+    assert {r["id"] for r in conn.execute("SELECT id FROM tasks")} == {parent, child}
+    conn.close()
+
+
 def test_node_schema_offers_no_claude_harness():
     """A cold client must not be able to pick a harness that bills Claude."""
     tool = next(t for t in mcp.TOOLS

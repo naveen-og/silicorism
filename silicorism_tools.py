@@ -442,10 +442,21 @@ def gc_worktrees(conn, db_path, *, failed=False) -> dict:
 def prune_tasks(conn) -> dict:
     """Delete completed/failed tasks and their logs. Pending and processing rows
     are never touched, so a live pipeline cannot be pruned out from under itself.
+    A completed/failed task is deleted only when NO surviving task with status
+    'pending' or 'processing' lists that task's id in its depends_on.
     """
     with db.immediate(conn) as c:
-        ids = [r["id"] for r in c.execute(
-            "SELECT id FROM tasks WHERE status IN ('completed','failed')")]
+        # Find completed/failed tasks that are NOT dependencies of any pending/processing task
+        ids = [r["id"] for r in c.execute("""
+            SELECT id FROM tasks
+            WHERE status IN ('completed','failed')
+              AND id NOT IN (
+                  SELECT DISTINCT d.value
+                  FROM tasks t
+                  JOIN json_each(COALESCE(t.depends_on,'[]')) d
+                  WHERE t.status IN ('pending','processing')
+              )
+        """)]
         if ids:
             marks = ",".join("?" * len(ids))
             c.execute(f"DELETE FROM execution_logs WHERE task_id IN ({marks})", ids)
