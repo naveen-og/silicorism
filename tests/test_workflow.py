@@ -472,10 +472,10 @@ def test_build_dag_wires_deps_and_attrs(tmp_path):
                                  (out["nodes"]["scout"],)).fetchone()["payload"])
     assert sp["model"] == "opencode/deepseek-v4-flash-free"
     assert sp["thinking"] == "high" and sp["skills"] == ["tdd"]
-    # harness becomes the task_type
+    # harness "claude" is coerced to "pi" so execution never routes to a Claude model
     bt = conn.execute("SELECT task_type FROM tasks WHERE id=?",
                       (out["nodes"]["build"],)).fetchone()["task_type"]
-    assert bt == "claude"
+    assert bt == "pi"
     conn.close()
 
 
