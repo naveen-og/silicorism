@@ -124,12 +124,14 @@ def _run_native(conn, task, agent_id, command: str) -> None:
                     or tmux.read_log_tail(logf)
                     or f"native pane {win} exit 0")
         db.complete_task(conn, tid, artifact=artifact)
-        # pipe-pane records every repaint; four agents left 13 MB behind once.
-        tmux.trim_log(logf)
         db.log(conn, tid, agent_id, f"completed (native): {win}")
     except Exception:
         _mark_pane(tid, pane, failed=True, window=win)
         raise
+    finally:
+        # pipe-pane records every repaint; four agents left 13 MB behind once,
+        # and a failing run left 137 MB — so this trims on every exit path.
+        tmux.trim_log(logf)
     _mark_pane(tid, pane, failed=False, window=win)
 
 
