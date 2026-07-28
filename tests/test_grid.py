@@ -212,6 +212,36 @@ def test_a_failed_pane_target_write_does_not_launch_a_second_agent(tmp_path):
     conn.close()
 
 
+def test_a_running_agent_keeps_heartbeating_so_it_is_not_reaped(tmp_path):
+    """The worker blocks for the agent's whole run. A frozen last_seen let
+    reap_stale requeue the task and a second worker launch a second live agent
+    into the same directory."""
+    import db
+    import worker
+
+    dbp = str(tmp_path / "hb.db")
+    db.init_db(dbp)
+    conn = db.connect(dbp)
+    tid = db.add_task(conn, "pi", "{}")
+    db.heartbeat(conn, "w0", "busy", tid)
+    seen = lambda: conn.execute(  # noqa: E731
+        "SELECT last_seen FROM agent_heartbeats WHERE agent_id='w0'").fetchone()[0]
+    before = seen()
+
+    poll = worker._stop_and_beat(conn, "w0", tid, every=0)
+    time.sleep(0.01)  # last_seen has millisecond resolution
+    assert poll() is False  # reports the stop flag, which is not set
+    beaten = seen()
+    assert beaten > before, (before, beaten)
+
+    # A live agent must survive the reaper the wait loop runs every pass.
+    conn.execute("UPDATE tasks SET status='processing', agent_id='w0' WHERE id=?",
+                 (tid,))
+    conn.commit()
+    assert db.reap_stale(conn, older_than_s=300) == 0
+    conn.close()
+
+
 def test_worker_records_the_pane_target(tmp_path):
     import db
     import worker

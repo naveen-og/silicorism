@@ -105,6 +105,30 @@ def _mark_pane(task_id, pane, *, failed: bool, window=None) -> None:
         pass
 
 
+def _stop_and_beat(conn, agent_id, task_id, *, every: float = 30.0):
+    """Poll callback for wait_for_exit: reports the stop flag AND stays alive.
+
+    _run_native blocks for the agent's whole run, so without a beat here the
+    worker's last_seen freezes at claim time; after 300s db.reap_stale
+    (db.py:417, called from every silicorism_wait loop) hands the task to a
+    second worker, which launches a second live agent in the same directory.
+    Seen for real: task 2 claimed by worker-0 at 09:30:02 and again by
+    worker-1 at 09:35:03, two panes editing the same files.
+    """
+    state = {"next": 0.0}
+
+    def poll() -> bool:
+        if time.monotonic() >= state["next"]:
+            state["next"] = time.monotonic() + every
+            try:
+                db.heartbeat(conn, agent_id, "busy", task_id)
+            except Exception:  # noqa: BLE001 - a missed beat must not kill the run
+                pass
+        return _STOP
+
+    return poll
+
+
 def _run_native(conn, task, agent_id, command: str) -> None:
     """Execute an agent live in a tmux pane; raise on non-zero/absent exit."""
     tid = task["id"]
@@ -115,7 +139,8 @@ def _run_native(conn, task, agent_id, command: str) -> None:
     # Covers the whole body, so no error route leaves the pane titled RUNNING.
     try:
         db.log(conn, tid, agent_id, f"native pane {win}{'.' + pane if pane else ''}")
-        code = tmux.wait_for_exit(sentinel, stop=lambda: _STOP)
+        code = tmux.wait_for_exit(
+            sentinel, stop=_stop_and_beat(conn, agent_id, tid))
         if code != 0:
             raise RuntimeError(
                 f"native agent exit {code if code is not None else 'timeout'}")
