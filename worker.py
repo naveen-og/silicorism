@@ -217,6 +217,8 @@ def _stop_and_beat(conn, agent_id, task_id, cwd, *, every: float = 30.0,
 
     def poll() -> bool:
         if _STOP:
+            if reason is not None:
+                reason["stopped"] = True
             return True
         if time.monotonic() < state["next"]:
             return False
@@ -267,6 +269,10 @@ def _run_native(conn, task, agent_id, command: str) -> None:
             if reason.get("stalled"):
                 raise AgentAlive("native agent stalled: no progress for "
                                  f"{int(reason['stalled'])}s")
+            if reason.get("stopped"):
+                # requeue_agent_tasks hands the work back; the pane must not
+                # outlive the worker that was supervising it.
+                raise AgentAlive("worker stopping, agent still running")
             if code is None:
                 raise AgentAlive(f"native agent exit timeout ({int(cap)}s)")
             raise RuntimeError(f"native agent exit {code}")
