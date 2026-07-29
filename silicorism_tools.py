@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import time
+from datetime import datetime, timezone
 
 import db
 import handlers
@@ -468,6 +469,32 @@ def prune_tasks(conn) -> dict:
     return {"deleted": len(ids)}
 
 
+def _stalled(conn, *, idle_s: float = 300.0) -> list[dict]:
+    """Processing tasks whose files have not changed for `idle_s` seconds.
+
+    `busy` with a fresh heartbeat looked exactly like healthy progress for an
+    hour of wall clock; this is the row that makes the difference readable
+    without attaching to a pane.
+    """
+    out = []
+    for r in conn.execute(
+            "SELECT id, agent_id, last_progress_at, started_at FROM tasks "
+            "WHERE status='processing'").fetchall():
+        stamp = r["last_progress_at"] or r["started_at"]
+        if not stamp:
+            continue
+        try:
+            seen = datetime.strptime(
+                stamp, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+        idle = (datetime.now(timezone.utc) - seen).total_seconds()
+        if idle >= idle_s:
+            out.append({"id": r["id"], "agent_id": r["agent_id"],
+                        "last_progress_at": stamp, "idle_s": round(idle)})
+    return out
+
+
 def get_status(conn) -> dict:
     """Live DAG + P2P snapshot for the orchestrator context.
 
@@ -479,6 +506,9 @@ def get_status(conn) -> dict:
         "tasks": verdict["tasks"],
         "satisfied": verdict["satisfied"],
         "failures": verdict["failures"],
+        # A busy agent that has written nothing for minutes: the one reading
+        # that separates a working run from a wedged one.
+        "stalled": _stalled(conn),
         "agents": [dict(h) for h in db.heartbeats(conn)],
         # Trimmed hard: every row here is orchestrator context the user pays
         # for, and a successful task's artifact tells the planner nothing.

@@ -120,26 +120,67 @@ def _mark_pane(task_id, pane, *, failed: bool, window=None) -> None:
         pass
 
 
-def _stop_and_beat(conn, agent_id, task_id, *, every: float = 30.0):
-    """Poll callback for wait_for_exit: reports the stop flag AND stays alive.
+# Directories an agent's work never shows up in; walking node_modules on every
+# beat would cost more than the signal is worth.
+_SKIP_DIRS = {"node_modules", "__pycache__", "venv", "dist", "build", "target"}
+
+
+def newest_mtime(root: str) -> float:
+    """Newest mtime under `root`, or 0.0 if it cannot be read.
+
+    The progress signal has to tell drawing apart from working: tmux pipe-pane
+    records every repaint, so a spinning TUI grows its log forever while the
+    agent is wedged. Files on disk do not lie about that.
+
+    ponytail: a full walk every beat; swap for inotify if it ever profiles.
+    """
+    newest = 0.0
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames
+                       if d not in _SKIP_DIRS and not d.startswith(".")]
+        for name in filenames:
+            try:
+                m = os.stat(os.path.join(dirpath, name)).st_mtime
+            except OSError:  # raced deletion, broken symlink
+                continue
+            newest = max(newest, m)
+    return newest
+
+
+def _stop_and_beat(conn, agent_id, task_id, cwd, *, every: float = 30.0):
+    """Poll callback for wait_for_exit: stop flag, heartbeat AND progress.
 
     _run_native blocks for the agent's whole run, so without a beat here the
     worker's last_seen freezes at claim time; after 300s db.reap_stale
-    (db.py:417, called from every silicorism_wait loop) hands the task to a
+    (db.py, called from every silicorism_wait loop) hands the task to a
     second worker, which launches a second live agent in the same directory.
     Seen for real: task 2 claimed by worker-0 at 09:30:02 and again by
     worker-1 at 09:35:03, two panes editing the same files.
+
+    The same tick fingerprints the task's tree, because a beat on its own
+    cannot tell a working agent from a wedged one — `busy` with a fresh
+    last_seen looked like healthy progress for an hour of wall clock.
     """
-    state = {"next": 0.0}
+    state = {"next": 0.0, "mtime": None}
 
     def poll() -> bool:
-        if time.monotonic() >= state["next"]:
-            state["next"] = time.monotonic() + every
+        if _STOP:
+            return True
+        if time.monotonic() < state["next"]:
+            return False
+        state["next"] = time.monotonic() + every
+        try:
+            db.heartbeat(conn, agent_id, "busy", task_id)
+        except Exception:  # noqa: BLE001 - a missed beat must not kill the run
+            pass
+        m = newest_mtime(cwd)
+        if state["mtime"] is None or m > state["mtime"]:
+            state["mtime"] = m
             try:
-                db.heartbeat(conn, agent_id, "busy", task_id)
-            except Exception:  # noqa: BLE001 - a missed beat must not kill the run
+                db.touch_progress(conn, task_id)
+            except Exception:  # noqa: BLE001
                 pass
-        return _STOP
+        return False
 
     return poll
 
@@ -155,7 +196,7 @@ def _run_native(conn, task, agent_id, command: str) -> None:
     try:
         db.log(conn, tid, agent_id, f"native pane {win}{'.' + pane if pane else ''}")
         code = tmux.wait_for_exit(
-            sentinel, stop=_stop_and_beat(conn, agent_id, tid))
+            sentinel, stop=_stop_and_beat(conn, agent_id, tid, _task_cwd(task)))
         if code != 0:
             raise RuntimeError(
                 f"native agent exit {code if code is not None else 'timeout'}")

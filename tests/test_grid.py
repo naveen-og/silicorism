@@ -228,7 +228,7 @@ def test_a_running_agent_keeps_heartbeating_so_it_is_not_reaped(tmp_path):
         "SELECT last_seen FROM agent_heartbeats WHERE agent_id='w0'").fetchone()[0]
     before = seen()
 
-    poll = worker._stop_and_beat(conn, "w0", tid, every=0)
+    poll = worker._stop_and_beat(conn, "w0", tid, str(tmp_path), every=0)
     time.sleep(0.01)  # last_seen has millisecond resolution
     assert poll() is False  # reports the stop flag, which is not set
     beaten = seen()

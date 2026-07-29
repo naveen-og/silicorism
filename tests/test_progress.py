@@ -72,3 +72,67 @@ def test_dag_node_carries_test_command(tmp_path):
         (dag["nodes"]["build"],)).fetchone()["payload"])
     assert payload["test_command"] == "npm test"
     conn.close()
+
+
+def test_newest_mtime_ignores_noise_dirs(tmp_path):
+    import os
+    import time
+    import worker
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "a.py").write_text("x")
+    base = worker.newest_mtime(str(tmp_path))
+    junk = tmp_path / "node_modules"
+    junk.mkdir()
+    (junk / "b.js").write_text("y")
+    os.utime(junk / "b.js", (time.time() + 500, time.time() + 500))
+    assert worker.newest_mtime(str(tmp_path)) == base
+    (tmp_path / "src" / "c.py").write_text("z")
+    assert worker.newest_mtime(str(tmp_path)) > base
+
+
+def test_beat_stamps_progress_only_when_files_change(tmp_path, monkeypatch):
+    """Counted, not timestamped: db.now() has millisecond resolution and three
+    polls of a two-file tree land inside the same millisecond."""
+    import worker
+    dbp = str(tmp_path / "beat.db")
+    db.init_db(dbp)
+    conn = db.connect(dbp)
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / "a.txt").write_text("1")
+    tid, _ = _task(conn, {"prompt": "x", "cwd": str(work)})
+    db.claim_task(conn, "w0")
+
+    stamps = []
+    real = db.touch_progress
+    monkeypatch.setattr(db, "touch_progress",
+                        lambda c, t: (stamps.append(t), real(c, t))[1])
+
+    poll = worker._stop_and_beat(conn, "w0", tid, str(work), every=0.0)
+    assert poll() is False
+    assert stamps == [tid], "the first tick establishes the baseline"
+    assert conn.execute("SELECT last_progress_at FROM tasks WHERE id=?",
+                        (tid,)).fetchone()["last_progress_at"] is not None
+
+    assert poll() is False
+    assert stamps == [tid], "an unchanged tree must not look like progress"
+
+    (work / "b.txt").write_text("2")
+    assert poll() is False
+    assert stamps == [tid, tid], "a new file is progress"
+    conn.close()
+
+
+def test_status_reports_stalled_tasks(tmp_path):
+    import silicorism_tools
+    dbp = str(tmp_path / "stall.db")
+    db.init_db(dbp)
+    conn = db.connect(dbp)
+    tid = db.add_task(conn, "pi", json.dumps({"prompt": "x"}))
+    db.claim_task(conn, "w0")
+    conn.execute("UPDATE tasks SET last_progress_at=? WHERE id=?",
+                 ("2020-01-01T00:00:00.000Z", tid))
+    stalled = silicorism_tools.get_status(conn)["stalled"]
+    assert [s["id"] for s in stalled] == [tid]
+    assert stalled[0]["idle_s"] > 60
+    conn.close()

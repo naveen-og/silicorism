@@ -42,6 +42,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     worktree_path   TEXT,            -- dedicated git worktree for this task
     pane_target     TEXT,            -- tmux "<window>.<pane_id>" showing this task
     started_at      TEXT,            -- stamped when a worker claims the task
+    last_progress_at TEXT,           -- stamped when the task's files last changed
     created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
     updated_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );
@@ -119,6 +120,7 @@ _MIGRATIONS = (
     ("worktree_path", "TEXT"),
     ("pane_target", "TEXT"),
     ("started_at", "TEXT"),
+    ("last_progress_at", "TEXT"),
 )
 
 
@@ -265,6 +267,18 @@ def complete_task(conn, task_id, artifact: str | None = None) -> None:
             "updated_at=? WHERE id=?",
             (artifact, now(), task_id),
         )
+
+
+def touch_progress(conn, task_id) -> None:
+    """Stamp observable progress: the task's files changed since the last beat.
+
+    Distinct from the heartbeat on purpose. A heartbeat says the worker process
+    is alive; a live worker blocked on a wedged agent beats `busy` for an hour
+    while nothing is written. This is the column that tells them apart.
+    """
+    with immediate(conn) as c:
+        c.execute("UPDATE tasks SET last_progress_at=? WHERE id=?",
+                  (now(), task_id))
 
 
 def set_pane_target(conn, task_id, target: str) -> None:
