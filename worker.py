@@ -94,15 +94,25 @@ def _timeouts(task) -> tuple[float, float]:
             float(data.get("stall_timeout_s", STALL_TIMEOUT_S)))
 
 
+def _db_slug(path: str) -> str:
+    """Repo-ish name for a db path: /repo/.git/silicorism.db -> repo."""
+    parts = [p for p in os.path.dirname(os.path.abspath(path)).split(os.sep)
+             if p and p != ".git"]
+    return (parts[-1] if parts else "db")[:12]
+
+
 def _pane_label(task) -> str:
-    """Agent id makes the best pane label; fall back to the task type."""
+    """"<run>/<agent id>" — one session holds panes from several runs at once,
+    and telling them apart by token counter is not a workflow."""
+    data = {}
     try:
-        data = json.loads(task["payload"] or "{}")
-        if isinstance(data, dict) and data.get("agent_id"):
-            return str(data["agent_id"])
+        loaded = json.loads(task["payload"] or "{}")
+        if isinstance(loaded, dict):
+            data = loaded
     except (json.JSONDecodeError, ValueError, TypeError):
         pass
-    return f"{task['task_type']}-{task['id']}"
+    label = data.get("agent_id") or f"{task['task_type']}-{task['id']}"
+    return f"{_db_slug(data['db'])}/{label}" if data.get("db") else str(label)
 
 
 def _place_pane(conn, task, command: str, sentinel: str, logfile: str):
@@ -173,6 +183,17 @@ def newest_mtime(root: str) -> float:
                 continue
             newest = max(newest, m)
     return newest
+
+
+def _kill_pane(pane, window=None) -> None:
+    """Close a finished pane; best-effort, no verdict ever depends on it."""
+    try:
+        if pane:
+            tmux.kill_pane(pane)
+        elif window:
+            tmux.kill_window(window)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _stop_and_beat(conn, agent_id, task_id, cwd, *, every: float = 30.0,
@@ -261,14 +282,24 @@ def _run_native(conn, task, agent_id, command: str) -> None:
                 {"test_command": gate, "cwd": _task_cwd(task)}))
         db.complete_task(conn, tid, artifact=artifact)
         db.log(conn, tid, agent_id, f"completed (native): {win}")
-    except Exception:
+    except Exception as err:
         _mark_pane(tid, pane, failed=True, window=win)
+        if isinstance(err, AgentAlive):
+            # A timed-out pane leaks the agent plus everything it spawned; a
+            # plain non-zero exit is already dead and its scrollback is the
+            # post-mortem, so that one is kept.
+            tmux.trim_log(logf)
+            _kill_pane(pane, win)
         raise
     finally:
         # pipe-pane records every repaint; four agents left 13 MB behind once,
         # and a failing run left 137 MB — so this trims on every exit path.
         tmux.trim_log(logf)
     _mark_pane(tid, pane, failed=False, window=win)
+    # The artifact is already captured; a session that keeps every DONE pane
+    # becomes unreadable after a few runs — 13 panes from four runs once, most
+    # of them finished shells.
+    _kill_pane(pane, win)
 
 
 def _open_task_window(db_path, task) -> None:

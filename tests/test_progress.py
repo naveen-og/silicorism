@@ -181,6 +181,59 @@ def test_stalled_run_fails_with_its_reason(mock_tmux, tmp_path):
     conn.close()
 
 
+def test_launch_script_kills_its_children(tmp_path):
+    import tmux_orchestrator as tmux
+    launch = tmux._launch_script("42", "sleep 5", str(tmp_path / "s.exit"))
+    path = launch.split(" ", 1)[1].strip("'")
+    body = open(path, encoding="utf-8").read()
+    # the pane's process group, so gopls/pyright die with the pane
+    assert "kill -TERM 0" in body and "trap" in body, body
+    import os
+    os.remove(path)
+
+
+def test_pane_label_names_the_run():
+    import worker
+    assert worker._db_slug("/home/me/Projects/splice/.git/silicorism.db") == "splice"
+    task = {"payload": json.dumps({"agent_id": "step4",
+                                   "db": "/home/me/Projects/splice/.git/x.db"}),
+            "task_type": "pi", "id": 3}
+    assert worker._pane_label(task) == "splice/step4"
+
+
+@patch("worker.tmux")
+def test_stall_kills_the_pane_and_clean_exit_does_not(mock_tmux, tmp_path):
+    import worker
+    dbp = str(tmp_path / "kill.db")
+    db.init_db(dbp)
+    conn = db.connect(dbp)
+    work = tmp_path / "w"
+    work.mkdir()
+    mock_tmux.sentinel_path.side_effect = lambda tid: str(tmp_path / f"{tid}.exit")
+    mock_tmux.log_path.side_effect = lambda tid: str(tmp_path / f"{tid}.log")
+    mock_tmux.grid_pane.return_value = ("agents", "%9")
+
+    # a non-zero exit: the process is already dead, keep the pane for a look
+    tid, task = _task(conn, {"prompt": "x", "cwd": str(work)})
+    mock_tmux.wait_for_exit.return_value = 3
+    try:
+        worker._run_native(conn, task, "w0", "pi 'x'")
+    except RuntimeError:
+        pass
+    mock_tmux.kill_pane.assert_not_called()
+
+    # a stall: the agent is still live, so the pane and its children must go
+    tid2, task2 = _task(conn, {"prompt": "y", "cwd": str(work),
+                               "stall_timeout_s": 0.05})
+    mock_tmux.wait_for_exit.side_effect = _stopping_wait
+    try:
+        worker._run_native(conn, task2, "w0", "pi 'y'")
+    except worker.AgentAlive:
+        pass
+    mock_tmux.kill_pane.assert_called_once_with("%9")
+    conn.close()
+
+
 def test_status_reports_stalled_tasks(tmp_path):
     import silicorism_tools
     dbp = str(tmp_path / "stall.db")

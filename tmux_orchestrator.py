@@ -145,11 +145,18 @@ def _launch_script(task_id, command: str, sentinel: str) -> str:
     so pi dropped its TUI and printed plain text: the panes showed output
     instead of a live agent. Logging is tmux's job now (see _log_pane).
     The sentinel is written atomically via mv.
+
+    The trap is what makes kill_pane final: hanging up the shell leaves the
+    agent's grandchildren (gopls, pyright-langserver) resident, and a timed-out
+    node used to leak them. tmux gives each pane its own process group, so
+    signalling group 0 takes the whole tree down.
     """
     path = os.path.join(_sentinel_dir(), f"task-{task_id}.sh")
     tmp = shlex.quote(sentinel + ".tmp")
     fin = shlex.quote(sentinel)
     with open(path, "w", encoding="utf-8") as fh:
+        # `trap -` first, or the handler signals itself and re-enters.
+        fh.write("trap 'trap - TERM; kill -TERM 0' HUP INT TERM\n")
         fh.write(f"{command}\necho $? > {tmp}\nmv {tmp} {fin}\n")
     return f"sh {shlex.quote(path)}"
 
@@ -291,6 +298,16 @@ def mark_pane_done(pane_id: str, *, failed: bool = False) -> None:
           f"{base} {FAILED if failed else DONE}".strip())
 
 
+def kill_pane(pane_id: str) -> None:
+    """Close a pane for good — used when the agent inside it is still running."""
+    _tmux("kill-pane", "-t", pane_id)
+
+
+def kill_window(name: str, *, session: str = SESSION) -> None:
+    """Close a whole task window (the no-grid fallback path)."""
+    _tmux("kill-window", "-t", _window_target(session, name))
+
+
 def wait_for_exit(sentinel: str, *, timeout: float = 3600.0, poll: float = 0.5,
                   stop=None) -> int | None:
     """Poll a sentinel file for the task's exit code. None on timeout/stop."""
@@ -365,6 +382,8 @@ if __name__ == "__main__":
     assert any("send-keys" in f and script in f for f in flat), flat
     body = open(script, encoding="utf-8").read()
     assert "echo $? >" in body and "| tee " not in body, body
+    # the pane's whole process group dies with it, language servers included
+    assert "kill -TERM 0" in body, body
     # logging is tmux's job, so the agent keeps a tty and renders its TUI
     assert any("pipe-pane" in f and "task-9.log" in f for f in flat), flat
     os.remove(script)
