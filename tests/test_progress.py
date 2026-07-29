@@ -286,3 +286,28 @@ def test_status_reports_stalled_tasks(tmp_path):
     assert [s["id"] for s in stalled] == [tid]
     assert stalled[0]["idle_s"] > 60
     conn.close()
+
+
+def test_real_worker_fails_a_lying_node(tmp_path, monkeypatch):
+    """The F1 acceptance check: a node whose gate fails must end `failed`.
+
+    No tmux: run_worker only goes native under SILICORISM_NATIVE, so the
+    in-process pi handler stands in for an agent that writes nothing and claims
+    success — the behaviour that shipped a broken step 4 as completed.
+    """
+    import handlers
+    import worker
+    dbp = str(tmp_path / "e2e.db")
+    db.init_db(dbp)
+    conn = db.connect(dbp)
+    monkeypatch.setitem(handlers.HANDLERS, "pi",
+                        lambda payload, context=None: "all tests pass, honest")
+    agent = db.add_task(conn, "pi", json.dumps(
+        {"prompt": "x", "cwd": str(tmp_path)}), max_retries=0)
+    db.add_task(conn, "verify", json.dumps(
+        {"test_command": "false", "cwd": str(tmp_path)}),
+        depends_on=agent, max_retries=0)
+    worker.run_worker(dbp, "w0", max_idle_loops=2)
+    counts = db.counts(conn)
+    assert counts["failed"] == 1 and counts["completed"] == 1
+    conn.close()
