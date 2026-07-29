@@ -400,7 +400,8 @@ def wait_for_settle(conn, *, timeout_s=600.0, poll=1.0, stop=None) -> dict:
 
     This replaces the poll loop: one Claude turn per DAG, not one per poll.
     """
-    deadline = time.monotonic() + min(max(float(timeout_s), 1.0), WAIT_CAP_S)
+    started = time.monotonic()
+    deadline = started + min(max(float(timeout_s), 1.0), WAIT_CAP_S)
     already_failed = {f["id"] for f in verify_status(conn)["failures"]}
     while True:
         # A worker killed hard never requeues its task, and everything behind
@@ -409,10 +410,15 @@ def wait_for_settle(conn, *, timeout_s=600.0, poll=1.0, stop=None) -> dict:
         verdict = verify_status(conn)
         fresh = [f for f in verdict["failures"] if f["id"] not in already_failed]
         if verdict["active"] == 0 or fresh:
-            verdict["settled"] = True
+            verdict.update(settled=True, timed_out=False,
+                           elapsed_s=round(time.monotonic() - started, 1))
             return verdict
         if (stop and stop()) or time.monotonic() >= deadline:
-            verdict["settled"] = False
+            # A timeout was shape-identical to a real verdict, so an
+            # orchestrator could read "no failures" out of "nothing finished".
+            verdict.update(settled=False,
+                           timed_out=time.monotonic() >= deadline,
+                           elapsed_s=round(time.monotonic() - started, 1))
             return verdict
         time.sleep(poll)
 

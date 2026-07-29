@@ -100,3 +100,18 @@ def test_the_wait_recovers_a_task_whose_worker_was_killed(tmp_path):
                         (tid,)).fetchone()["status"] == "pending"
     assert out["settled"] is False  # requeued, not finished
     conn.close()
+
+
+def test_wait_says_when_it_timed_out(tmp_path):
+    """A timeout used to be shape-identical to a real verdict; the only
+    discriminator was settled=false, which is easy to skim past."""
+    conn, _ = _conn(tmp_path)
+    tid = db.add_task(conn, "sleep", "5")     # stays pending: never settles
+    out = st.wait_for_settle(conn, timeout_s=1, poll=0.1)
+    assert out["settled"] is False and out["timed_out"] is True
+    assert out["elapsed_s"] >= 1
+
+    db.complete_task(conn, tid, artifact="done")
+    out2 = st.wait_for_settle(conn, timeout_s=5, poll=0.1)
+    assert out2["settled"] is True and out2["timed_out"] is False
+    conn.close()

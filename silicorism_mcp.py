@@ -353,7 +353,10 @@ TOOLS = [
         "name": "silicorism_wait",
         "description": "Block until the queue settles (all tasks terminal, or "
                        "any task failed), then return the verdict once. Use "
-                       "this instead of polling silicorism_get_status.",
+                       "this instead of polling silicorism_get_status. On "
+                       "'timed_out': true nothing settled — read "
+                       "silicorism_get_status's 'stalled' list, cancel a wedged "
+                       "task with silicorism_cancel_task, then wait again.",
         "inputSchema": {
             "type": "object",
             "properties": {
