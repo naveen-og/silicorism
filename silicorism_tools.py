@@ -300,7 +300,11 @@ def build_dag(conn, db_path, nodes, *, name=None, base="main", cwd=None) -> dict
                 raise ValueError(f"node {nid!r}: {harness} node needs a prompt")
             payload = {"prompt": n["prompt"], "cwd": work_path,
                        "p2p": n.get("p2p", True), "agent_id": nid, "db": db_path}
-            for key in ("model", "thinking", "skills"):
+            # test_command turns this node into its own gate: the worker runs
+            # it after the agent exits (worker._gate_command), so the node
+            # cannot report a pass its tests do not support.
+            for key in ("model", "thinking", "skills", "test_command",
+                        "timeout_s", "stall_timeout_s"):
                 if n.get(key):
                     payload[key] = n[key]
         id_map[nid] = db.add_task(conn, harness, json.dumps(payload),

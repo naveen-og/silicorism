@@ -56,6 +56,21 @@ def _native_payload(task) -> str:
     return json.dumps(data)
 
 
+def _gate_command(task) -> str | None:
+    """A pi node's own acceptance test, run by the worker — not by the agent.
+
+    The pane's exit code says the agent process ended, not that the work is
+    correct: autoexit.ts exits 0 for any run that settled without an error stop
+    reason, so an agent that ran nothing at all still "succeeds". Seen for real:
+    a node reported completed while its own test file had `fail 1`.
+    """
+    try:
+        data = json.loads(task["payload"] or "{}")
+    except (json.JSONDecodeError, ValueError):
+        return None
+    return data.get("test_command") if isinstance(data, dict) else None
+
+
 def _pane_label(task) -> str:
     """Agent id makes the best pane label; fall back to the task type."""
     try:
@@ -148,6 +163,12 @@ def _run_native(conn, task, agent_id, command: str) -> None:
         artifact = (tmux.read_log_tail(_artifact_path(tid), max_chars=4000)
                     or tmux.read_log_tail(logf)
                     or f"native pane {win} exit 0")
+        gate = _gate_command(task)
+        if gate:
+            # Raises on non-zero, so the except below fails the task: this is
+            # the only thing between a claimed pass and a real one.
+            artifact += "\n\n" + handlers.verify(json.dumps(
+                {"test_command": gate, "cwd": _task_cwd(task)}))
         db.complete_task(conn, tid, artifact=artifact)
         db.log(conn, tid, agent_id, f"completed (native): {win}")
     except Exception:
