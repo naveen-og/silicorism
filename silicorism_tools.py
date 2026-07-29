@@ -17,18 +17,19 @@ import tmux_orchestrator as tmux
 
 WORKTREE_ROOT = handlers.WORKTREE_ROOT
 
-# Default per-role models: the OSS trio on bedrock-mantle, matched to role
-# strengths — glm-5 reasons (scout), qwen3-coder builds, kimi-k2.5 reviews/fixes.
+# Default per-role models: the OSS pair on bedrock-mantle, matched to role
+# strengths — glm-5 reasons (scout), kimi-k2.5 builds, reviews and fixes.
+# qwen3-coder-480b is not a default anywhere by operator instruction.
 DEFAULT_MODELS = {
     "scout": "bedrock-mantle/zai.glm-5",
-    "builder": "bedrock-mantle/qwen.qwen3-coder-480b-a35b-instruct",
+    "builder": "bedrock-mantle/moonshotai.kimi-k2.5",
     "fixer": "bedrock-mantle/moonshotai.kimi-k2.5",
 }
 DEFAULT_THINKING = "high"
 
-# `simple` runs one agent on the strongest coder in the trio; no scout to read
-# a codebase that may not exist yet, no fixer loop for a task this size.
-SIMPLE_MODEL = "bedrock-mantle/qwen.qwen3-coder-480b-a35b-instruct"
+# `simple` runs one agent on the coder of the pair; no scout to read a codebase
+# that may not exist yet, no fixer loop for a task this size.
+SIMPLE_MODEL = "bedrock-mantle/moonshotai.kimi-k2.5"
 
 
 def _build_standard(conn, db_path, name, prompt, *, base="main",
@@ -199,7 +200,7 @@ def build_pipeline(conn, db_path, name, prompt, *, base="main",
                    complexity="standard", cwd=None) -> dict:
     """Build a DAG sized to the request. Tiers:
 
-      simple    one agent (qwen3-coder-480b) in cwd, verify iff test_command
+      simple    one agent (kimi-k2.5) in cwd, verify iff test_command
       standard  worktree -> scout -> builder -> fixer -> verify [-> merge] -> cleanup
       complex   parallel builders in separate worktrees joined by an integrator
 
@@ -238,6 +239,20 @@ def _toposort(nodes: list[dict]) -> list[str]:
     for v in graph:
         visit(v)
     return order
+
+
+# Appended to every pi node prompt. Each line answers something observed: an
+# agent that reported a green suite while its own test failed, one that silently
+# dropped a config value the prompt told it to choose, and one that summarised
+# command output instead of pasting it.
+DELIVERABLES = (
+    "\n\n--- Required deliverables ---\n"
+    "1. Paste the verbatim output of every command that proves the acceptance "
+    "criteria. No summaries, no paraphrase.\n"
+    "2. State every value this prompt asked you to choose, and why you chose it.\n"
+    "3. Never report a command as passing without its pasted output. If you did "
+    "not run it, say so."
+)
 
 
 def build_dag(conn, db_path, nodes, *, name=None, base="main", cwd=None) -> dict:
@@ -300,7 +315,7 @@ def build_dag(conn, db_path, nodes, *, name=None, base="main", cwd=None) -> dict
         else:
             if not n.get("prompt"):
                 raise ValueError(f"node {nid!r}: {harness} node needs a prompt")
-            payload = {"prompt": n["prompt"], "cwd": work_path,
+            payload = {"prompt": n["prompt"] + DELIVERABLES, "cwd": work_path,
                        "p2p": n.get("p2p", True), "agent_id": nid, "db": db_path}
             # test_command turns this node into its own gate: the worker runs
             # it after the agent exits (worker._gate_command), so the node
@@ -591,7 +606,7 @@ if __name__ == "__main__":
         # default models are the bedrock-mantle OSS trio with high thinking
         sp = json.loads(conn.execute("SELECT payload FROM tasks WHERE id=?",
                                      (p["tasks"]["builder"],)).fetchone()["payload"])
-        assert sp["model"] == "bedrock-mantle/qwen.qwen3-coder-480b-a35b-instruct"
+        assert sp["model"] == "bedrock-mantle/moonshotai.kimi-k2.5"
         assert sp["thinking"] == "high"
         # merge=True wires fixer->verify->merge->cleanup
         pm = build_pipeline(conn, dbp, "demo2", "add auth", merge=True)

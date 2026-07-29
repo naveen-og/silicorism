@@ -34,12 +34,12 @@ def test_simple_is_one_agent_and_no_worktree(tmp_path):
     conn.close()
 
 
-def test_simple_pins_qwen3_coder(tmp_path):
+def test_simple_pins_kimi(tmp_path):
     conn, dbp = _conn(tmp_path)
     out = st.build_pipeline(conn, dbp, "game", "build a python game",
                             complexity="simple")
     assert _payload(conn, out["tasks"]["solo"])["model"] == (
-        "bedrock-mantle/qwen.qwen3-coder-480b-a35b-instruct")
+        "bedrock-mantle/moonshotai.kimi-k2.5")
     conn.close()
 
 

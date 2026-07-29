@@ -20,7 +20,7 @@ WORKTREE_ROOT = "/tmp/worktrees"
 # Task types that run as native CLI agents in a live tmux pane (SILICORISM_NATIVE).
 NATIVE_AGENTS = ("pi", "claude")
 
-DEFAULT_PI_MODEL = "bedrock-mantle/qwen.qwen3-coder-480b-a35b-instruct"
+DEFAULT_PI_MODEL = "bedrock-mantle/moonshotai.kimi-k2.5"
 
 # autoexit.ts: lets a worker pane run the full pi TUI and still yield a
 # deterministic exit code + artifact file (see extensions/autoexit.ts).
@@ -43,8 +43,9 @@ MODEL_ALIASES = {
 
 # Retry escalation: each failed attempt bumps a pi task to the next stronger
 # model. OSS-only by design — a retry must never silently bill Claude tokens.
+# qwen3-coder-480b is deliberately absent: it stays reachable by name through
+# MODEL_ALIASES, but nothing routes onto it by default.
 ESCALATION = [
-    "bedrock-mantle/qwen.qwen3-coder-480b-a35b-instruct",
     "bedrock-mantle/moonshotai.kimi-k2.5",
     "bedrock-mantle/zai.glm-5",
 ]
@@ -474,12 +475,12 @@ if __name__ == "__main__":
         pass
     else:
         raise AssertionError("failing verify must raise")
-    # escalation ladder: qwen -> kimi -> glm -> None; non-pi untouched
-    p1 = escalate_payload("pi", json.dumps({"prompt": "x", "model": "qwen3-coder-480b"}))
-    assert json.loads(p1)["model"] == "bedrock-mantle/moonshotai.kimi-k2.5"
-    p2 = escalate_payload("pi", p1)
-    assert json.loads(p2)["model"] == "bedrock-mantle/zai.glm-5"
-    assert escalate_payload("pi", p2) is None
+    # escalation ladder: kimi -> glm -> None; an off-ladder model joins at rung 1
+    p1 = escalate_payload("pi", json.dumps({"prompt": "x", "model": "kimi-k2.5"}))
+    assert json.loads(p1)["model"] == "bedrock-mantle/zai.glm-5"
+    assert escalate_payload("pi", p1) is None
+    off = escalate_payload("pi", json.dumps({"prompt": "x", "model": "hy3"}))
+    assert json.loads(off)["model"] == "bedrock-mantle/moonshotai.kimi-k2.5"
     assert escalate_payload("shell", "echo hi") is None
     # native pi command: full TUI (no -p) + autoexit extension + artifact env
     cmd = native_command("pi", json.dumps(

@@ -66,9 +66,14 @@ INSTRUCTIONS = (
     "Spend your reasoning at plan time: each node's prompt must carry explicit "
     "acceptance criteria and file-level scope, because the executing models are "
     "smaller than you and fail on underspecified instructions.\n"
-    "Execution models are the bedrock OSS trio with thinking=high: "
-    "qwen3-coder-480b (build), kimi-k2.5 (review/fix), glm-5 (reason/scout). "
-    "Never assign a Claude model to an execution node.\n\nYOU are the orchestrator: you ask the questions, write the plan and gate the "
+    "Execution models are the bedrock OSS pair with thinking=high: "
+    "kimi-k2.5 (build/review/fix) and glm-5 (reason/scout). Never assign a "
+    "Claude model to an execution node, and never qwen3-coder-480b.\n"
+    "A pi node may carry `test_command`: the worker runs it after the agent "
+    "exits and fails the node on non-zero, so a node cannot report a success "
+    "its tests do not support. Give a slow node `stall_timeout_s` (default "
+    "600) — a node whose files stop changing for that long is failed instead "
+    "of held to the 3600s ceiling.\n\nYOU are the orchestrator: you ask the questions, write the plan and gate the "
     "results yourself. Never delegate the planning or the implementation to another "
     "Claude agent or subagent — the execution nodes are pi agents on OSS models, and "
     "that is the only place work runs."
@@ -258,12 +263,24 @@ TOOLS = [
                                         "agent; 'verify' makes this node a test gate: "
                                         "give test_command, not prompt"},
                             "test_command": {"type": "string",
-                                             "description": "harness=verify only"},
+                                             "description": "on a verify node, "
+                                             "the gate itself; on a pi node, the "
+                                             "worker runs it after the agent "
+                                             "exits and fails the node on "
+                                             "non-zero"},
+                            "stall_timeout_s": {"type": "number",
+                                                "description": "fail this node "
+                                                "after this many seconds with no "
+                                                "file changes (default 600, 0 "
+                                                "disables)"},
+                            "timeout_s": {"type": "number",
+                                          "description": "wall-clock cap for this "
+                                          "node (default 3600)"},
                             "model": {"type": "string",
-                                      "description": "friendly name: qwen3-coder-480b "
-                                      "(build), kimi-k2.5 (review/fix), glm-5 "
-                                      "(reason/scout). These resolve on the pi harness "
-                                      "only. Never a Claude model."},
+                                      "description": "friendly name: kimi-k2.5 "
+                                      "(build/review/fix), glm-5 (reason/scout). "
+                                      "These resolve on the pi harness only. "
+                                      "Never a Claude model."},
                             "thinking": {"type": "string",
                                          "description": "off|minimal|low|medium|high|xhigh|max"},
                             "skills": {"type": "array", "items": {"type": "string"}},

@@ -87,9 +87,9 @@ auto-starts native-pane workers** in one call. Pass `prompt` plus a
 plus each failed task's artifact + last error; `silicorism_verify_and_continue`
 lets the orchestrator resubmit a corrective DAG and re-run until satisfied.
 
-Default per-role models are the **bedrock-mantle OSS trio** (`thinking:high`):
-scout `zai.glm-5`, builder `qwen.qwen3-coder-480b-a35b-instruct`, fixer
-`moonshotai.kimi-k2.5` — all overridable per node. Friendly names
+Default per-role models are the **bedrock-mantle OSS pair** (`thinking:high`):
+scout `zai.glm-5`, builder and fixer `moonshotai.kimi-k2.5` — all overridable
+per node. Friendly names
 (`qwen3-coder-480b`, `kimi-k2.5`, `glm-5`, `deepseek-v4-flash`, `nemotron-3-ultra`,
 `hy3`, `mimo-2.5`, `north-mini-code`) resolve to full ids; full ids pass through.
 
@@ -99,7 +99,7 @@ six-node pipeline built for a refactor:
 
 | Tier | Shape | When |
 |------|-------|------|
-| `simple` | one agent on `qwen3-coder-480b`, in `cwd`, no worktree; a `verify` node only if you supply a test command | a self-contained program |
+| `simple` | one agent on `kimi-k2.5`, in `cwd`, no worktree; a `verify` node only if you supply a test command | a self-contained program |
 | `standard` | worktree → scout → builder → fixer → verify → cleanup | a change to an existing codebase |
 | `complex` | two builders in separate worktrees, fanned out from one scout, rejoined by `worktree_integrate` plus an integrator agent | work that splits into disjoint slices |
 
@@ -119,7 +119,7 @@ are addressed by tmux pane id, not window index, so a closed pane never shifts
 another agent's address. Attach with `tmux attach -t silicorism-session`.
 
 **Retry escalation.** A failed `pi` task requeues on the next stronger model:
-qwen3-coder-480b → kimi-k2.5 → glm-5, then fails for the orchestrator to handle.
+kimi-k2.5 → glm-5, then fails for the orchestrator to handle.
 
 **Verify gate + merge.** The standard pipeline is six nodes: a deterministic `verify`
 node re-runs the test command after the fixer — cleanup is unreachable unless it

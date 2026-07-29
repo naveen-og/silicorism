@@ -23,12 +23,19 @@ Claude subagent and never assign a Claude model to an execution node.
    acceptance criteria and file-level scope verbatim. Every execution node is
    `harness: "pi"`. End the chain with a `harness: "verify"` node holding the real test
    command, so no agent can declare the run done by claiming it.
-   Models: `glm-5` scouts and reasons, `qwen3-coder-480b` builds, `kimi-k2.5` reviews
-   and fixes. Tell the user to watch with `tmux attach -t silicorism-session`.
+   A `pi` node may also carry `test_command`: the worker runs it after the agent
+   exits and fails the node on non-zero, so the node cannot report a success its
+   tests do not support. Give a slow node `stall_timeout_s` (default 600) — a node
+   whose files stop changing for that long is failed rather than held to the 3600s
+   ceiling.
+   Models: `glm-5` scouts and reasons, `kimi-k2.5` builds, reviews and fixes. Never
+   `qwen3-coder-480b`. Tell the user to watch with `tmux attach -t silicorism-session`.
 5. **Wait** — call `silicorism_wait` once. Do not poll `silicorism_get_status` in a loop.
+   `timed_out: true` means nothing settled: read `silicorism_get_status`'s `stalled`
+   list, `silicorism_cancel_task` the wedged node, then wait again.
 6. **Verify and loop** — on failure, read the pane output and the task artifact, find the
    root cause, submit a corrective DAG. A dead pipeline that poisons the verdict is
-   cleared with `silicorism_gc(tasks=true)`.
+   cleared with `silicorism_gc(stuck=true, tasks=true)`.
 
 ## Why the prompts must be heavy
 

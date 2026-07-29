@@ -181,6 +181,45 @@ def test_stalled_run_fails_with_its_reason(mock_tmux, tmp_path):
     conn.close()
 
 
+def test_every_pi_node_must_paste_its_evidence(tmp_path):
+    import silicorism_tools
+    dbp = str(tmp_path / "deliv.db")
+    db.init_db(dbp)
+    conn = db.connect(dbp)
+    dag = silicorism_tools.build_dag(conn, dbp, [
+        {"id": "a", "prompt": "do it"},
+        {"id": "gate", "harness": "verify", "test_command": "true",
+         "depends_on": ["a"]}], cwd=str(tmp_path))
+    pi_payload = json.loads(conn.execute(
+        "SELECT payload FROM tasks WHERE id=?",
+        (dag["nodes"]["a"],)).fetchone()["payload"])
+    assert "do it" in pi_payload["prompt"]
+    assert "verbatim output" in pi_payload["prompt"]
+    # a gate has no prompt to harden
+    gate_payload = json.loads(conn.execute(
+        "SELECT payload FROM tasks WHERE id=?",
+        (dag["nodes"]["gate"],)).fetchone()["payload"])
+    assert "prompt" not in gate_payload
+    conn.close()
+
+
+def test_no_default_uses_a_banned_model(tmp_path):
+    import handlers
+    import silicorism_tools
+    dbp = str(tmp_path / "models.db")
+    db.init_db(dbp)
+    conn = db.connect(dbp)
+    silicorism_tools.build_pipeline(conn, dbp, "x", "add auth")
+    silicorism_tools.build_pipeline(conn, dbp, "y", "add auth",
+                                    complexity="simple", cwd=str(tmp_path))
+    payloads = [r["payload"] for r in
+                conn.execute("SELECT payload FROM tasks").fetchall()]
+    assert not [p for p in payloads if "qwen" in (p or "")]
+    assert "qwen" not in handlers.DEFAULT_PI_MODEL
+    assert not [m for m in handlers.ESCALATION if "qwen" in m]
+    conn.close()
+
+
 def test_launch_script_kills_its_children(tmp_path):
     import tmux_orchestrator as tmux
     launch = tmux._launch_script("42", "sleep 5", str(tmp_path / "s.exit"))

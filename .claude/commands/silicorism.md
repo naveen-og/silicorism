@@ -17,7 +17,8 @@ You plan. The pi agents build. Do not write the implementation yourself.
    order, each `depends_on` the previous. Copy the task's acceptance criteria and
    file scope into the node prompt verbatim. Never pass the raw goal to a built-in
    tier here: that discards the plan and makes a smaller model re-derive it.
-   Models: qwen3-coder-480b builds, kimi-k2.5 reviews and fixes, glm-5 scouts.
+   Models: kimi-k2.5 builds, reviews and fixes; glm-5 scouts and reasons.
+   Never qwen3-coder-480b.
    Set `name` to run the whole thing in a git worktree.
    Last node: `{"harness": "verify", "test_command": "<the plan's test command>"}`,
    depending on every task node. An agent can claim it is done; this cannot.
