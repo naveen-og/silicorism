@@ -12,6 +12,23 @@ Each entry is tagged **CONFIRMED** (directly observed with evidence) or **SUSPEC
 (one observation, alternative explanations not ruled out). Do not "fix" a SUSPECTED item
 before reproducing it.
 
+## Status — fixed 2026-07-29
+
+Every CONFIRMED item is fixed; see `docs/superpowers/specs/2026-07-29-silicorism-failure-fixes-design.md`
+and the plan beside it. F7 and F9 are untouched by design — reproduce first.
+
+| Item | Fix |
+|---|---|
+| F1 | `test_command` on a pi node; the worker runs it before `db.complete_task` |
+| F2 | `tasks.last_progress_at`, stamped from the newest mtime under the task cwd; `get_status().stalled` |
+| F3 | `stall_timeout_s` (default 600) fails a node whose files stop changing; `timeout_s` overrides the 3600s cap |
+| F4 | launch script traps HUP/INT/TERM and signals its process group; the worker kills the pane on stall/timeout |
+| F5 | `db.fail_stuck` via `silicorism_gc(stuck=true)`, plus `silicorism_cancel_task` |
+| F6 | `wait` returns `timed_out` and `elapsed_s`, and the tool says what to do next |
+| F8 | qwen3-coder-480b removed from every default and from the escalation ladder |
+| F10 | pane labels carry a run slug; successful panes are closed |
+| F11 | every pi node prompt ends with a required-deliverables block |
+
 ---
 
 ## F1 — A node reported success while its own tests were failing — **CONFIRMED**
