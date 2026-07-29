@@ -123,6 +123,64 @@ def test_beat_stamps_progress_only_when_files_change(tmp_path, monkeypatch):
     conn.close()
 
 
+def _stopping_wait(sentinel, **kw):
+    """Stand-in for tmux.wait_for_exit: polls stop() and returns None when it fires.
+
+    None is what the real function returns on stop/timeout, and that None is
+    what _run_native turns into a stall or a timeout.
+    """
+    import time
+    for _ in range(50):
+        if kw["stop"]():
+            return None
+        time.sleep(0.01)
+    raise AssertionError("stop() never fired")
+
+
+def test_poll_stops_and_reports_a_stall(tmp_path):
+    import time
+    import worker
+    dbp = str(tmp_path / "st.db")
+    db.init_db(dbp)
+    conn = db.connect(dbp)
+    work = tmp_path / "w"
+    work.mkdir()
+    (work / "a.txt").write_text("1")
+    tid, _ = _task(conn, {"prompt": "x", "cwd": str(work)})
+    db.claim_task(conn, "w0")
+
+    reason = {}
+    poll = worker._stop_and_beat(conn, "w0", tid, str(work), every=0.0,
+                                 stall_s=0.05, reason=reason)
+    assert poll() is False, "the first tick establishes the baseline"
+    time.sleep(0.06)
+    assert poll() is True, "no new files past the stall window is a stall"
+    assert reason["stalled"] >= 0.05
+    conn.close()
+
+
+@patch("worker.tmux")
+def test_stalled_run_fails_with_its_reason(mock_tmux, tmp_path):
+    import worker
+    dbp = str(tmp_path / "st2.db")
+    db.init_db(dbp)
+    conn = db.connect(dbp)
+    mock_tmux.sentinel_path.side_effect = lambda tid: str(tmp_path / f"{tid}.exit")
+    mock_tmux.log_path.side_effect = lambda tid: str(tmp_path / f"{tid}.log")
+    mock_tmux.grid_pane.return_value = ("agents", "%7")
+    mock_tmux.wait_for_exit.side_effect = _stopping_wait
+
+    tid, task = _task(conn, {"prompt": "x", "cwd": str(tmp_path),
+                             "stall_timeout_s": 0.05})
+    try:
+        worker._run_native(conn, task, "w0", "pi 'x'")
+    except worker.AgentAlive as err:
+        assert "stalled" in str(err)
+    else:
+        raise AssertionError("a stalled agent must raise AgentAlive")
+    conn.close()
+
+
 def test_status_reports_stalled_tasks(tmp_path):
     import silicorism_tools
     dbp = str(tmp_path / "stall.db")

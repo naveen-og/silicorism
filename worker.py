@@ -21,6 +21,17 @@ _STOP = False
 _TMUX = bool(os.environ.get("SILICORISM_TMUX"))
 _NATIVE = bool(os.environ.get("SILICORISM_NATIVE"))
 _CLI = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cli.py")
+# A node that hangs at minute 2 used to hold its worker until minute 60: the
+# 3600s cap in tmux.wait_for_exit is a ceiling, not a stall detector.
+STALL_TIMEOUT_S = float(os.environ.get("SILICORISM_STALL_S") or 600)
+
+
+class AgentAlive(RuntimeError):
+    """The run ended while the agent was still running (stall or timeout).
+
+    Distinct from a non-zero exit: there is still a live process and a live
+    pane to kill, and that pane is not a post-mortem — it is a leak.
+    """
 
 
 def _on_signal(signum, _frame):
@@ -69,6 +80,18 @@ def _gate_command(task) -> str | None:
     except (json.JSONDecodeError, ValueError):
         return None
     return data.get("test_command") if isinstance(data, dict) else None
+
+
+def _timeouts(task) -> tuple[float, float]:
+    """(wall-clock cap, stall window) for this node, in seconds."""
+    try:
+        data = json.loads(task["payload"] or "{}")
+        if not isinstance(data, dict):
+            data = {}
+    except (json.JSONDecodeError, ValueError):
+        data = {}
+    return (float(data.get("timeout_s") or 3600.0),
+            float(data.get("stall_timeout_s", STALL_TIMEOUT_S)))
 
 
 def _pane_label(task) -> str:
@@ -123,6 +146,9 @@ def _mark_pane(task_id, pane, *, failed: bool, window=None) -> None:
 # Directories an agent's work never shows up in; walking node_modules on every
 # beat would cost more than the signal is worth.
 _SKIP_DIRS = {"node_modules", "__pycache__", "venv", "dist", "build", "target"}
+# A queue DB inside the task's own directory is written by every heartbeat, so
+# its WAL would report progress for an agent that has done nothing.
+_SKIP_SUFFIXES = (".db", ".db-wal", ".db-shm")
 
 
 def newest_mtime(root: str) -> float:
@@ -139,6 +165,8 @@ def newest_mtime(root: str) -> float:
         dirnames[:] = [d for d in dirnames
                        if d not in _SKIP_DIRS and not d.startswith(".")]
         for name in filenames:
+            if name.endswith(_SKIP_SUFFIXES):
+                continue
             try:
                 m = os.stat(os.path.join(dirpath, name)).st_mtime
             except OSError:  # raced deletion, broken symlink
@@ -147,7 +175,8 @@ def newest_mtime(root: str) -> float:
     return newest
 
 
-def _stop_and_beat(conn, agent_id, task_id, cwd, *, every: float = 30.0):
+def _stop_and_beat(conn, agent_id, task_id, cwd, *, every: float = 30.0,
+                   stall_s: float = STALL_TIMEOUT_S, reason=None):
     """Poll callback for wait_for_exit: stop flag, heartbeat AND progress.
 
     _run_native blocks for the agent's whole run, so without a beat here the
@@ -159,9 +188,11 @@ def _stop_and_beat(conn, agent_id, task_id, cwd, *, every: float = 30.0):
 
     The same tick fingerprints the task's tree, because a beat on its own
     cannot tell a working agent from a wedged one — `busy` with a fresh
-    last_seen looked like healthy progress for an hour of wall clock.
+    last_seen looked like healthy progress for an hour of wall clock. Once the
+    tree has been quiet for `stall_s` the poll stops the wait and records why
+    in `reason`, so the caller can tell a stall from the operator's SIGINT.
     """
-    state = {"next": 0.0, "mtime": None}
+    state = {"next": 0.0, "mtime": None, "progress": time.monotonic()}
 
     def poll() -> bool:
         if _STOP:
@@ -176,10 +207,17 @@ def _stop_and_beat(conn, agent_id, task_id, cwd, *, every: float = 30.0):
         m = newest_mtime(cwd)
         if state["mtime"] is None or m > state["mtime"]:
             state["mtime"] = m
+            state["progress"] = time.monotonic()
             try:
                 db.touch_progress(conn, task_id)
             except Exception:  # noqa: BLE001
                 pass
+            return False
+        idle = time.monotonic() - state["progress"]
+        if stall_s > 0 and idle >= stall_s:  # <= 0 disables stall detection
+            if reason is not None:
+                reason["stalled"] = idle
+            return True
         return False
 
     return poll
@@ -195,11 +233,22 @@ def _run_native(conn, task, agent_id, command: str) -> None:
     # Covers the whole body, so no error route leaves the pane titled RUNNING.
     try:
         db.log(conn, tid, agent_id, f"native pane {win}{'.' + pane if pane else ''}")
+        cap, stall_s = _timeouts(task)
+        reason: dict = {}
+        # The beat is also when the stall is measured, so a node asking for a
+        # short window must be looked at more often than every 30s.
+        beat = min(30.0, stall_s / 2) if stall_s > 0 else 30.0
         code = tmux.wait_for_exit(
-            sentinel, stop=_stop_and_beat(conn, agent_id, tid, _task_cwd(task)))
+            sentinel, timeout=cap,
+            stop=_stop_and_beat(conn, agent_id, tid, _task_cwd(task),
+                                every=beat, stall_s=stall_s, reason=reason))
         if code != 0:
-            raise RuntimeError(
-                f"native agent exit {code if code is not None else 'timeout'}")
+            if reason.get("stalled"):
+                raise AgentAlive("native agent stalled: no progress for "
+                                 f"{int(reason['stalled'])}s")
+            if code is None:
+                raise AgentAlive(f"native agent exit timeout ({int(cap)}s)")
+            raise RuntimeError(f"native agent exit {code}")
         # Prefer the clean autoexit artifact; fall back to the raw log tail.
         artifact = (tmux.read_log_tail(_artifact_path(tid), max_chars=4000)
                     or tmux.read_log_tail(logf)
