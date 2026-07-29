@@ -428,6 +428,15 @@ def requeue_agent_tasks(conn, agent_id) -> None:
         )
 
 
+def _cutoff(older_than_s: float) -> str:
+    """Timestamp `older_than_s` in the past, in now()'s format.
+
+    Same format as now(), so the string comparison is a time comparison.
+    """
+    return (datetime.now(timezone.utc) - timedelta(seconds=older_than_s)
+            ).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+
+
 def reap_stale(conn, *, older_than_s: float = 300.0) -> int:
     """Requeue tasks whose worker died without requeuing them. Returns the count.
 
@@ -437,9 +446,7 @@ def reap_stale(conn, *, older_than_s: float = 300.0) -> int:
     `older_than_s` are touched — a live agent must never have its work
     handed to someone else.
     """
-    # Same format as now(), so the string comparison is a time comparison.
-    cutoff = (datetime.now(timezone.utc) - timedelta(seconds=older_than_s)
-              ).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+    cutoff = _cutoff(older_than_s)
     with immediate(conn) as c:
         cur = c.execute(
             "UPDATE tasks SET status='pending', agent_id=NULL, updated_at=? "
@@ -447,6 +454,49 @@ def reap_stale(conn, *, older_than_s: float = 300.0) -> int:
             "  SELECT agent_id FROM agent_heartbeats WHERE last_seen < ?)",
             (now(), cutoff))
     return cur.rowcount
+
+
+def fail_stuck(conn, *, older_than_s: float = 300.0) -> list[int]:
+    """Force-fail processing tasks that are not going anywhere. Returns their ids.
+
+    reap_stale only sees a dead heartbeat, and a live worker blocked on a
+    wedged agent keeps beating `busy`. That row is not terminal, so
+    silicorism_gc(tasks=True) cannot prune it either, and it poisons every
+    later wait verdict for that DB — the only workaround was abandoning the
+    whole database. Stale by heartbeat OR by progress is enough here; this is
+    a manual recovery, so it skips the retry ladder and ends the task.
+    """
+    cutoff = _cutoff(older_than_s)
+    with immediate(conn) as c:
+        ids = [r["id"] for r in c.execute(
+            "SELECT t.id FROM tasks t "
+            "LEFT JOIN agent_heartbeats h ON h.agent_id = t.agent_id "
+            "WHERE t.status='processing' AND ("
+            "  COALESCE(t.last_progress_at, t.started_at, t.updated_at) < ? "
+            "  OR COALESCE(h.last_seen, '') < ?)",
+            (cutoff, cutoff))]
+        if ids:
+            marks = ",".join("?" * len(ids))
+            c.execute(
+                f"UPDATE tasks SET status='failed', agent_id=NULL, updated_at=? "
+                f"WHERE id IN ({marks})", [now(), *ids])
+    return ids
+
+
+def cancel_task(conn, task_id) -> str | None:
+    """Force one task terminal whatever its state; returns its pane target.
+
+    The surgical version of fail_stuck, for the task the operator can name.
+    None means there is no such task.
+    """
+    with immediate(conn) as c:
+        row = c.execute("SELECT pane_target FROM tasks WHERE id=?",
+                        (task_id,)).fetchone()
+        if row is None:
+            return None
+        c.execute("UPDATE tasks SET status='failed', agent_id=NULL, "
+                  "updated_at=? WHERE id=?", (now(), task_id))
+    return row["pane_target"] or ""
 
 
 # --- observability ----------------------------------------------------------

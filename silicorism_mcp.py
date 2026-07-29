@@ -201,14 +201,29 @@ def _list_skills(args: dict) -> str:
     return json.dumps(skills.inventory(args.get("cwd")))
 
 
+def _cancel_task(args: dict) -> str:
+    """Force one task terminal and kill its pane (the wedged-run escape hatch)."""
+    dbp = _db(args)
+    db.init_db(dbp)
+    conn = db.connect(dbp)
+    try:
+        return json.dumps(silicorism_tools.cancel_task(conn, int(args["task_id"])))
+    finally:
+        conn.close()
+
+
 def _gc(args: dict) -> str:
-    """Reclaim finished worktrees; failed=true also removes quarantined ones; tasks=true prunes terminal task rows."""
+    """Reclaim finished worktrees; failed=true also removes quarantined ones;
+    stuck=true force-fails wedged processing tasks; tasks=true prunes terminal rows."""
     dbp = _db(args)
     db.init_db(dbp)
     conn = db.connect(dbp)
     try:
         out = silicorism_tools.gc_worktrees(
             conn, dbp, failed=bool(args.get("failed")))
+        # Before the prune, so the rows it just made terminal can be cleared.
+        if args.get("stuck"):
+            out["stuck"] = db.fail_stuck(conn)
         if args.get("tasks"):
             out["tasks"] = silicorism_tools.prune_tasks(conn)
         return json.dumps(out)
@@ -364,12 +379,33 @@ TOOLS = [
         "handler": _start_workers,
     },
     {
+        "name": "silicorism_cancel_task",
+        "description": "Force one task to 'failed' whatever its state and kill "
+                       "its tmux pane. Use it on a task silicorism_get_status "
+                       "reports under 'stalled', then silicorism_gc(tasks=true) "
+                       "to prune it.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "integer"},
+                "db": {"type": "string"},
+            },
+            "required": ["task_id"],
+        },
+        "handler": _cancel_task,
+    },
+    {
         "name": "silicorism_gc",
-        "description": "Garbage-collect finished worktrees; failed=true also removes quarantined ones; tasks=true prunes terminal task rows.",
+        "description": "Garbage-collect finished worktrees; failed=true also removes quarantined ones; stuck=true force-fails processing tasks whose worker or files stopped moving; tasks=true prunes terminal task rows.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "failed": {"type": "boolean"},
+                "stuck": {"type": "boolean",
+                          "description": "force-fail processing tasks whose "
+                                         "worker or files have stopped moving, "
+                                         "so a wedged run stops poisoning the "
+                                         "wait verdict"},
                 "tasks": {"type": "boolean",
                           "description": "also delete completed/failed task rows "
                                          "(and their logs) so a dead pipeline stops "

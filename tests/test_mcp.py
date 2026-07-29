@@ -39,7 +39,7 @@ def test_tools_list_exposes_canonical_tools():
     assert names == {"silicorism_plan_and_submit", "silicorism_get_status",
                      "silicorism_start_workers", "silicorism_gc",
                      "silicorism_verify_and_continue", "silicorism_list_skills",
-                     "silicorism_wait"}
+                     "silicorism_wait", "silicorism_cancel_task"}
     # every tool advertises an inputSchema (no handler leakage)
     for t in r["result"]["tools"]:
         assert set(t) == {"name", "description", "inputSchema"}
@@ -124,7 +124,7 @@ def test_end_to_end_stdio_handshake(tmp_path):
     # initialize + tools/list responses; the notification produced none
     assert len(lines) == 2
     assert lines[0]["result"]["serverInfo"]["name"] == "silicorism"
-    assert len(lines[1]["result"]["tools"]) == 7
+    assert len(lines[1]["result"]["tools"]) == 8
 
 
 def test_list_skills_tool(tmp_path):

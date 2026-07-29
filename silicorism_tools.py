@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 
 import db
 import handlers
+import tmux_orchestrator as tmux
 
 WORKTREE_ROOT = handlers.WORKTREE_ROOT
 
@@ -465,6 +466,11 @@ def prune_tasks(conn) -> dict:
         if ids:
             marks = ",".join("?" * len(ids))
             c.execute(f"DELETE FROM execution_logs WHERE task_id IN ({marks})", ids)
+            # agent_heartbeats.current_task_id is a real FK: a worker still
+            # pointing at the task it last ran would make the delete fail with
+            # "FOREIGN KEY constraint failed" and prune nothing at all.
+            c.execute("UPDATE agent_heartbeats SET current_task_id=NULL "
+                      f"WHERE current_task_id IN ({marks})", ids)
             c.execute(f"DELETE FROM tasks WHERE id IN ({marks})", ids)
     return {"deleted": len(ids)}
 
@@ -493,6 +499,26 @@ def _stalled(conn, *, idle_s: float = 300.0) -> list[dict]:
             out.append({"id": r["id"], "agent_id": r["agent_id"],
                         "last_progress_at": stamp, "idle_s": round(idle)})
     return out
+
+
+def cancel_task(conn, task_id, *, _kill=None) -> dict:
+    """Fail a named task and close its pane. `_kill` is injected by tests."""
+    pane = db.cancel_task(conn, task_id)
+    if pane is None:
+        return {"cancelled": False, "reason": f"no task {task_id}"}
+    db.log(conn, task_id, "operator", "cancelled by operator", level="error")
+    killed = False
+    if pane:
+        # pane_target is "<window>.<%pane>" on the grid path, a bare window
+        # name on the fallback path.
+        target = pane.rsplit(".", 1)[-1] if "%" in pane else pane
+        kill = _kill or (tmux.kill_pane if "%" in pane else tmux.kill_window)
+        try:
+            kill(target)
+            killed = True
+        except Exception:  # noqa: BLE001 - the pane may already be gone
+            pass
+    return {"cancelled": True, "task_id": task_id, "pane_killed": killed}
 
 
 def get_status(conn) -> dict:
