@@ -16,13 +16,21 @@ import re
 import shutil
 import signal
 import subprocess
+import sys
 import time
 
-import db
-import handlers
-import silicorism_tools
-import tmux_orchestrator as tmux
-from worker import run_worker
+# An installed console script imports siblings through whatever the editable
+# install froze into its module map. `dashboard` was added to py-modules after
+# the last install, so `silicorism dashboard` died with ModuleNotFoundError
+# everywhere. Our own directory is the truth; append (never insert) so nothing
+# here can shadow a stdlib name.
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
+import db  # noqa: E402
+import handlers  # noqa: E402
+import silicorism_tools  # noqa: E402
+import tmux_orchestrator as tmux  # noqa: E402
+from worker import _db_slug, run_worker  # noqa: E402
 
 _POOL: list[mp.Process] = []
 
@@ -174,9 +182,14 @@ def cmd_dashboard(args) -> None:
     """Curses status + DAG + P2P view (runs in the supervisor's window 0)."""
     import dashboard
 
+    # A monitor pointed at a DB nobody has submitted to yet used to die on
+    # `no such table: tasks`. init_db is idempotent, so create the schema and
+    # show an empty DAG instead.
+    db.init_db(args.db)
     conn = db.connect(args.db)
     try:
-        dashboard.run(conn, interval=args.interval)
+        # Label it with the repo it is watching: one screen often shows two.
+        dashboard.run(conn, interval=args.interval, label=_db_slug(args.db))
     except KeyboardInterrupt:
         pass
     finally:

@@ -331,9 +331,12 @@ def supervisor_layout(db_path: str, *, agent: str = "pi", extension: str | None 
     """Window 0 split into orchestrator agent (top) + live dashboard (bottom)."""
     ensure_session(session)
     win = _window_target(session, "dashboard")
-    # bottom pane: the polling dashboard.
-    _tmux("split-window", "-v", "-t", win, "-c", ".")
-    _tmux("send-keys", "-t", f"{win}.1",
+    # bottom pane: the polling dashboard. Send to the pane id tmux hands back,
+    # not to `.1` — on a second `supervise` the window is already split and
+    # index 1 is the *old* dashboard, so the new one typed into the wrong pane.
+    r = _tmux("split-window", "-v", "-t", win, "-c", ".", "-P", "-F", "#{pane_id}")
+    pane = r.stdout.strip() or f"{win}.1"
+    _tmux("send-keys", "-t", pane,
           f"silicorism dashboard --db {shlex.quote(db_path)}", "Enter")
     # top pane: the orchestrator agent (pi/claude), optionally auto-started.
     if launch:
