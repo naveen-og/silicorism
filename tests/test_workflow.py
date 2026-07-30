@@ -296,8 +296,11 @@ def test_native_command_pi_with_p2p():
     assert cmd.startswith("export SILICORISM_DB=")
     assert "SILICORISM_SELF=fixer-x" in cmd
     assert "silicorism-msg()" in cmd
-    # full TUI (no -p) with the autoexit extension driving exit + artifact
-    assert "autoexit.ts --no-session --model opencode/hy3-free" in cmd
+    # full TUI (no -p) with the autoexit extension driving exit + artifact.
+    # Asserted as parts, not as one fixed sequence: the isolation flags sit
+    # between them (see tests/test_isolation.py).
+    assert "autoexit.ts" in cmd and "--no-session" in cmd
+    assert "--model opencode/hy3-free" in cmd
     assert " -p " not in cmd
     assert "build it" in cmd
 

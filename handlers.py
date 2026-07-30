@@ -85,6 +85,25 @@ def resolve_model(model: str | None) -> str | None:
     """Map a friendly canonical name to its opencode id; pass full ids through."""
     return MODEL_ALIASES.get(model, model) if model else model
 
+
+# Checked in order; the first one present wins.
+CONTEXT_FILES = ("AGENTS.md", "CLAUDE.md")
+
+
+def project_context(cwd: str | None) -> str | None:
+    """Path to the repo's own context file in `cwd`, or None.
+
+    Returns a path, never text: pi's --append-system-prompt takes either, so a
+    name that is not a file would be appended as the literal string.
+    """
+    if not cwd:
+        return None
+    for name in CONTEXT_FILES:
+        path = os.path.join(cwd, name)
+        if os.path.isfile(path):
+            return path
+    return None
+
 P2P_NOTE = (
     "\n\n--- Coordination ---\n"
     "You are one agent in a pool sharing a P2P channel. If architectural intent "
@@ -193,8 +212,24 @@ def native_command(task_type: str, payload: str, context=None,
         # the agent settles and writes the clean artifact to $SILICORISM_ARTIFACT.
         if data.get("artifact"):
             prelude += f"export SILICORISM_ARTIFACT={shlex.quote(data['artifact'])}; "
+        # An execution node runs on exactly what the plan gave it. Left to
+        # discover, pi loads the operator's global CLAUDE.md, their skills,
+        # their prompt templates and every installed extension: measured on one
+        # five-word prompt at 13,976 input tokens against 1,815 isolated, paid
+        # on every turn of every node, and different on every machine. Those
+        # rules are also written for a conversational assistant, which fights
+        # the deliverables block telling the node to paste output verbatim.
+        # -ne matters twice over: extensions/silicorism.ts registers
+        # silicorism_plan_and_submit, so a discovered copy let an execution node
+        # queue its own DAGs. An explicit -e path still loads.
         parts = ["pi", "-e", AUTOEXIT_EXT, "--no-session",
+                 "-nc", "-ne", "-ns", "-np",
                  "--model", resolve_model(data.get("model")) or DEFAULT_PI_MODEL]
+        # The repo's own conventions are part of the task, so they go back in by
+        # path rather than by discovery.
+        project = project_context(data.get("cwd"))
+        if project:
+            parts += ["--append-system-prompt", project]
         if data.get("thinking"):
             parts += ["--thinking", data["thinking"]]
         parts.append(prompt)

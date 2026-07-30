@@ -95,6 +95,10 @@ def _native_payload(task) -> str:
     except (json.JSONDecodeError, ValueError):
         return task["payload"]
     data["artifact"] = _artifact_path(task["id"])
+    # tmux sets the pane's cwd, but the command builder needs it too, to see
+    # whether the repo has a context file worth passing. A worktree node carries
+    # that path on the row rather than in the payload.
+    data.setdefault("cwd", _task_cwd(task))
     return json.dumps(data)
 
 

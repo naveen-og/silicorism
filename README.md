@@ -84,6 +84,8 @@ exists because the opposite happened in a real run.
 | An artifact belongs to its own run | Pane logs and artifacts are namespaced per DB and truncated before the pane opens. Both were keyed on the task id alone in one shared directory, and every DB numbers from 1 — so a node with no artifact of its own reported an unrelated run's pane text as output, and that output is handed to the next node as context. |
 | Retries never silently bill Claude | The escalation ladder is OSS-only: `kimi-k2.5` → `glm-5`, then the failure goes to the orchestrator. |
 | A model swap is never mistaken for misrouting | Escalation records `model_requested` instead of overwriting `model` in place, and the dashboard marks the running model `^glm-5`. Without it, a glm-5 pane for a node the plan sent to kimi-k2.5 is indistinguishable from a routing bug. |
+| A node runs on the plan, not on the machine | pi nodes launch with `-nc -ne -ns -np`, so they do not discover the operator's global `CLAUDE.md`, skills, prompt templates or installed extensions. Measured on one five-word prompt: **13,999 input tokens with discovery on, 1,837 without** — paid every turn of every node, and different on every machine. The repo's own `AGENTS.md`/`CLAUDE.md` is added back deliberately by path, so a node keeps its project's conventions and none of the operator's. |
+| A worker cannot start its own runs | `extensions/silicorism.ts` registers `silicorism_plan_and_submit` and `install-extension` puts it in `~/.pi/extensions`, so every execution node used to discover the orchestrator's own tools. `-ne` removes them; the explicit `-e autoexit.ts` still loads. |
 | The shipped package is what is here | A test asserts `py-modules` covers every top-level module and every console-script target is callable, and CI installs the package and drives it from outside the repo. `silicorism dashboard` shipped unable to start because the suite only ever ran from the repo, where CWD is on `sys.path`. |
 
 ## Native agents, harnesses & skills
@@ -98,7 +100,9 @@ A DAG node picks its harness and model via the payload: `{"model": "kimi-k2.5"}`
 routes `pi`, an Anthropic model id routes `claude`. Requested skills
 (`{"skills": ["coding-excellence"]}`) are resolved from `~/.claude/skills`,
 `~/.pi/skills`, and local `./.claude/skills`, `./.pi/skills` (local wins) and
-injected into the agent prompt.
+injected into the agent prompt. That injection is the *only* way a skill reaches
+a node: pi's own discovery is off, so a node's context is exactly what the plan
+bound plus the repo's own `AGENTS.md`. See the isolation rows above.
 
 ## MCP server (Claude Code)
 

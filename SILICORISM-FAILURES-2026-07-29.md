@@ -14,8 +14,9 @@ before reproducing it.
 
 ## Status — fixed 2026-07-29
 
-Every CONFIRMED item is fixed; see `docs/superpowers/specs/2026-07-29-silicorism-failure-fixes-design.md`
-and the plan beside it. F7 and F9 are untouched by design — reproduce first.
+Every item is now closed. See `docs/superpowers/specs/2026-07-29-silicorism-failure-fixes-design.md`
+and the plan beside it. F7 and F9 were reproduced on 2026-07-30 before anything
+was changed: F7 turned out not to be a routing bug, F9 was real and measurable.
 
 | Item | Fix |
 |---|---|
@@ -28,6 +29,8 @@ and the plan beside it. F7 and F9 are untouched by design — reproduce first.
 | F8 | qwen3-coder-480b removed from every default and from the escalation ladder |
 | F10 | pane labels carry a run slug; successful panes are closed |
 | F11 | every pi node prompt ends with a required-deliverables block |
+| F7 | not a routing bug: the retry ladder was the only thing changing a model, and it now records `model_requested` instead of overwriting it |
+| F9 | pi nodes launch with `-nc -ne -ns -np`; the repo's own context file is re-added by path |
 
 ### Verified against real runs — 2026-07-30
 
@@ -222,6 +225,12 @@ the DB and on screen. Fixed: escalation now records `model_requested`, and the
 dashboard marks an escalated model `^glm-5` (with the `retry N` column beside it).
 No resolution code was changed, per the instruction below.
 
+Closed at the far end too: a real `pi -p --mode json` reports the model it ran
+on as message metadata, and it matches what it was asked for —
+`bedrock-mantle/moonshotai.kimi-k2.5` → `moonshotai.kimi-k2.5`,
+`bedrock-mantle/zai.glm-5` → `zai.glm-5`. So the chain is verified end to end:
+plan spec → payload → `--model` → the model that actually answered.
+
 The original report follows.
 
 ---
@@ -256,7 +265,37 @@ configurable default rather than hardcoded model names.
 
 ---
 
-## F9 — Execution agents inherit the operator's global prompt customisations — **SUSPECTED**
+## F9 — Execution agents inherit the operator's global prompt customisations — **CONFIRMED and fixed 2026-07-30**
+
+Measured, not argued. The same five-word prompt to a real `pi -p`:
+
+| launched with | input tokens | sees the repo's own AGENTS.md |
+|---|---|---|
+| discovery on (the old command) | **13,999** | no |
+| `-nc -ne -ns -np` (the new command) | **1,837** | no |
+| the new command, in a repo with AGENTS.md | 1,156 | **yes** |
+
+So roughly 12,000 input tokens per node per turn were the operator's global
+`CLAUDE.md`, their discovered skills, their prompt templates and every installed
+extension. Three separate problems in one: it is paid on every turn of every
+node, it is different on every machine so a DAG is not reproducible, and those
+rules are written for a conversational assistant, which directly fights the
+deliverables block telling the node to paste command output verbatim.
+
+`-ne` turned out to matter twice over. `extensions/silicorism.ts` registers
+`silicorism_plan_and_submit`, and `silicorism install-extension` puts it in
+`~/.pi/extensions` — so every execution node was discovering the orchestrator's
+own tools and could queue its own DAGs.
+
+Fixed in `handlers.native_command`: pi nodes launch with `-nc -ne -ns -np`, and
+the repo's own context file is added back deliberately by path
+(`--append-system-prompt <cwd>/AGENTS.md`, else `CLAUDE.md`) so a node keeps its
+project's conventions and none of the operator's. The explicit `-e autoexit.ts`
+is unaffected by `-ne`. Guarded by `tests/test_isolation.py`.
+
+The original report follows.
+
+---
 
 Every agent pane's statusline showed `caveman level: FULL` and `ponytail: ⚡ FULL`, i.e. the
 agents are loading the user's global `CLAUDE.md` plus the caveman (terse output) and ponytail
