@@ -373,3 +373,15 @@ def test_a_frame_off_a_real_db_needs_no_seeding(tmp_path):
     text = "\n".join(dashboard.flatten(lines))
     assert "silicorism  probe" in text and "1 nodes" in text
     assert G["wait"] in text
+
+
+def test_the_bar_never_draws_outside_its_own_box():
+    """Reserving a cell per status overruns once there are fewer cells than
+    statuses, and a bar wider than its box shifts the whole header."""
+    counts = _counts(completed=4, failed=1, processing=2, pending=3)
+    for width in range(2, 30):
+        bar = dashboard.progress_bar(counts, width, G)
+        assert dashboard.span_width(bar) == width, (width, bar)
+    for total in range(0, 9):
+        assert sum(dashboard._allocate([4, 1, 2, 3], total)) == total, total
+    assert dashboard._allocate([0, 0, 0, 0], 10) == [0, 0, 0, 0]

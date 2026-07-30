@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shlex
 import signal
 import time
@@ -24,6 +25,8 @@ _CLI = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cli.py")
 # A node that hangs at minute 2 used to hold its worker until minute 60: the
 # 3600s cap in tmux.wait_for_exit is a ceiling, not a stall detector.
 STALL_TIMEOUT_S = float(os.environ.get("SILICORISM_STALL_S") or 600)
+# Set per worker process from its DB path: which queue's task ids these are.
+_CAPTURE_SLUG = ""
 
 
 class AgentAlive(RuntimeError):
@@ -48,9 +51,37 @@ def _task_cwd(task) -> str:
         return "."
 
 
+def _capture_path(task_id) -> str:
+    """Pane-capture log for a task, namespaced by the DB the id came from.
+
+    The log dir is shared and every DB numbers its tasks from 1, so two runs'
+    task 1 piped into one file: an agent that wrote no artifact had the other
+    run's text reported as its output — and that output is handed to the next
+    node as its context.
+    """
+    base = tmux.log_path(task_id)
+    if not _CAPTURE_SLUG:
+        return base
+    head, tail = os.path.split(base)
+    return os.path.join(head, f"{_CAPTURE_SLUG}-{tail}")
+
+
 def _artifact_path(task_id) -> str:
     """Clean-text artifact written by autoexit.ts (TUI logs are ANSI soup)."""
-    return tmux.log_path(task_id) + ".artifact"
+    return _capture_path(task_id) + ".artifact"
+
+
+def _clear_capture(task_id) -> None:
+    """Empty a task's log and artifact before its pane opens.
+
+    Namespacing is not quite enough on its own: dropping a DB restarts the ids,
+    so a second run in the same repo would still find the first run's files.
+    """
+    for path in (_capture_path(task_id), _artifact_path(task_id)):
+        try:
+            open(path, "w").close()
+        except OSError:
+            pass
 
 
 def _native_payload(task) -> str:
@@ -250,7 +281,8 @@ def _run_native(conn, task, agent_id, command: str) -> None:
     """Execute an agent live in a tmux pane; raise on non-zero/absent exit."""
     tid = task["id"]
     sentinel = tmux.sentinel_path(tid)
-    logf = tmux.log_path(tid)
+    logf = _capture_path(tid)
+    _clear_capture(tid)
     tmux.ensure_session()
     win, pane = _place_pane(conn, task, command, sentinel, logf)
     # Covers the whole body, so no error route leaves the pane titled RUNNING.
@@ -331,6 +363,8 @@ def _close_task_window(task_id, *, failed) -> None:
 
 def run_worker(db_path: str, agent_id: str, *, idle_sleep: float = 0.1,
                max_idle_loops: int = 0) -> None:
+    global _CAPTURE_SLUG
+    _CAPTURE_SLUG = re.sub(r"[^A-Za-z0-9_-]", "_", _db_slug(db_path))
     signal.signal(signal.SIGINT, _on_signal)
     signal.signal(signal.SIGTERM, _on_signal)
 

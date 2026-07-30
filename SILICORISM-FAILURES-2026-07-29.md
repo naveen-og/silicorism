@@ -29,6 +29,30 @@ and the plan beside it. F7 and F9 are untouched by design — reproduce first.
 | F10 | pane labels carry a run slug; successful panes are closed |
 | F11 | every pi node prompt ends with a required-deliverables block |
 
+### Verified against real runs — 2026-07-30
+
+A real `run_worker` in native mode driving real tmux panes, with only the agent
+command substituted so the run is deterministic:
+
+| Check | Evidence |
+|---|---|
+| F1 | agent printed "ALL DONE - everything passes" and exited 0; `test_command: exit 3` → task **failed** in 1.0s, log `error: verify failed (exit 3)` |
+| F1 (pass) | same node with `test_command: true` → **completed**, artifact ends `verify passed: true` |
+| F3 | agent hung; `stall_timeout_s: 20` → **failed** at ~20s, log `error: native agent stalled: no progress for 20s` |
+| F4 | that agent's 3 `sleep` descendants: 3 while running, **0** after; pane gone |
+| F5 | wedged `processing` row → `silicorism_gc(stuck=true, tasks=true)` returned `"stuck": [1]`, processing 1→0, failed 0→1 |
+| F6 | `silicorism_wait(timeout_s=60)` → `settled: false, timed_out: true, elapsed_s: 60.0` at a 60.0s wall clock; `silicorism_cancel_task` then cleared it |
+
+Two bugs the verification itself turned up, both fixed:
+
+- Pane logs and artifacts were keyed on the task id alone in one shared
+  directory, and every DB numbers its tasks from 1 — so a node with no artifact
+  of its own reported an unrelated run's pane text as its output, and that text
+  is handed to the next node as context. Now namespaced per DB and truncated
+  before the pane opens.
+- `silicorism dashboard` could never start from the installed CLI
+  (`ModuleNotFoundError: dashboard`), and died on an uninitialised DB.
+
 ---
 
 ## F1 — A node reported success while its own tests were failing — **CONFIRMED**

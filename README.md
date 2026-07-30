@@ -17,9 +17,15 @@ stays readable — the fifth agent opens `agents-2`.
 
 ![The dashboard window](docs/images/dashboard.png)
 
-The `dashboard` window shows the DAG as a tree: each node's model (or, for a
-gate node, its test command), how long it has been running, and which pane it is
-in. `q` quits, `r` redraws.
+The `dashboard` window answers "is this run healthy" at a glance: a stacked
+done/failed/running/pending bar, then every node in execution order with its
+model (or, for a gate node, its test command), elapsed time, pane, and `idle Nm`
+when a running node's files have stopped changing. Below it, which workers are
+still beating (`DEAD` when one is not), the actual failure line, and the P2P
+feed. Running nodes spin, so a frozen monitor is never mistaken for a quiet
+queue. Long runs fold their finished nodes into `N done` rather than pushing the
+live ones off screen. `q` quits; glyphs fall back to ASCII off a UTF-8 locale or
+under `SILICORISM_ASCII=1`.
 
 ## Layout
 | File | Role |
@@ -30,7 +36,7 @@ in. `q` quits, `r` redraws.
 | `cli.py` | init / add / run / status / submit-feature / supervise / gc / msg … |
 | `silicorism_tools.py` | harness-agnostic bridge: pipeline build, gc, status, worker spawn |
 | `tmux_orchestrator.py` | the agents grid: tiled panes, pane-id addressing, per-task logs |
-| `dashboard.py` | curses dashboard: DAG tree, models, timers, P2P feed |
+| `dashboard.py` | curses dashboard: progress bar, DAG, worker liveness, errors, P2P |
 | `skills.py` | resolve + inject skill prompts from `.claude`/`.pi` (global + local) |
 | `silicorism_mcp.py` | pure-stdlib JSON-RPC stdio MCP server for Claude Code |
 | `extensions/silicorism.ts` | native Pi extension (typechecks clean vs shipped `pi` types) |

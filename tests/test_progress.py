@@ -311,3 +311,43 @@ def test_real_worker_fails_a_lying_node(tmp_path, monkeypatch):
     counts = db.counts(conn)
     assert counts["failed"] == 1 and counts["completed"] == 1
     conn.close()
+
+
+def test_two_queues_do_not_share_one_pane_log(tmp_path, monkeypatch):
+    """Task ids restart at 1 in every DB and the log dir is shared, so run B's
+    task 1 read run A's pane text back as its own artifact."""
+    import tmux_orchestrator as tmux
+    import worker
+
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    monkeypatch.setattr(tmux, "log_path", lambda tid: str(logs / f"task-{tid}.log"))
+
+    monkeypatch.setattr(worker, "_CAPTURE_SLUG", "repo-a")
+    a_log, a_art = worker._capture_path(1), worker._artifact_path(1)
+    monkeypatch.setattr(worker, "_CAPTURE_SLUG", "repo-b")
+    b_log, b_art = worker._capture_path(1), worker._artifact_path(1)
+    assert a_log != b_log and a_art != b_art
+    assert a_art.endswith(".artifact") and "repo-a-task-1.log" in a_log
+
+
+def test_a_pane_starts_with_an_empty_log_and_artifact(tmp_path, monkeypatch):
+    """Dropping a DB restarts the ids, so namespacing alone still leaves run
+    two of the same repo reading run one's files."""
+    import tmux_orchestrator as tmux
+    import worker
+
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    monkeypatch.setattr(tmux, "log_path", lambda tid: str(logs / f"task-{tid}.log"))
+    monkeypatch.setattr(worker, "_CAPTURE_SLUG", "")
+    stale_log = logs / "task-1.log"
+    stale_log.write_text("output from a completely different run\n")
+    stale_art = logs / "task-1.log.artifact"
+    stale_art.write_text("I finished the taskboard, all tests green\n")
+
+    worker._clear_capture(1)
+
+    assert stale_log.read_text() == ""
+    assert stale_art.read_text() == ""
+    assert tmux.read_log_tail(str(stale_art)) == ""

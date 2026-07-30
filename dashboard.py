@@ -216,9 +216,8 @@ def _allocate(values, total: int) -> list[int]:
     if live <= 0 or total <= 0:
         return [0] * len(values)
     exact = [v * total / live for v in values]
-    cells = [min(int(e), total) if v else 0 for e, v in zip(exact, values)]
-    cells = [max(c, 1) if v else 0 for c, v in zip(cells, values)]
-    # Hand out or claw back the rounding slack, biggest fraction first.
+    cells = [max(int(e), 1) if v else 0 for e, v in zip(exact, values)]
+    # Hand out the rounding slack, biggest fraction first.
     order = sorted(range(len(values)), key=lambda i: exact[i] - int(exact[i]),
                    reverse=True)
     while sum(cells) < total:
@@ -227,14 +226,16 @@ def _allocate(values, total: int) -> list[int]:
                 break
             if values[i]:
                 cells[i] += 1
-    while sum(cells) > total:
-        for i in reversed(order):
-            if sum(cells) <= total:
-                break
-            if cells[i] > 1:
-                cells[i] -= 1
-        else:
-            break  # every bar is down to its single reserved cell
+    # Claw the overrun back off the right-hand end, which is what a reserved
+    # cell per status costs when there are more statuses than cells. The sum
+    # must equal `total` exactly or the bar draws outside its own box.
+    over = sum(cells) - total
+    for i in reversed(range(len(cells))):
+        if over <= 0:
+            break
+        take = min(cells[i], over)
+        cells[i] -= take
+        over -= take
     return cells
 
 
