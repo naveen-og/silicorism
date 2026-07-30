@@ -351,3 +351,63 @@ def test_a_pane_starts_with_an_empty_log_and_artifact(tmp_path, monkeypatch):
     assert stale_log.read_text() == ""
     assert stale_art.read_text() == ""
     assert tmux.read_log_tail(str(stale_art)) == ""
+
+
+def test_the_gate_binds_on_the_in_process_path_too(tmp_path, monkeypatch):
+    """test_command was enforced only inside _run_native, so the same payload was
+    checked or ignored depending on whether SILICORISM_NATIVE happened to be set."""
+    import handlers
+    import worker
+    dbp = str(tmp_path / "gate-inproc.db")
+    db.init_db(dbp)
+    conn = db.connect(dbp)
+    monkeypatch.setitem(handlers.HANDLERS, "pi",
+                        lambda payload, context=None: "shipped it, all green")
+    tid = db.add_task(conn, "pi", json.dumps(
+        {"prompt": "x", "cwd": str(tmp_path), "test_command": "exit 3"}),
+        max_retries=0)
+    worker.run_worker(dbp, "w0", max_idle_loops=2)
+    row = conn.execute("SELECT status FROM tasks WHERE id=?", (tid,)).fetchone()
+    assert row["status"] == "failed"
+    errors = [r["message"] for r in conn.execute(
+        "SELECT message FROM execution_logs WHERE task_id=? AND level='error'",
+        (tid,))]
+    assert any("verify failed (exit 3)" in m for m in errors), errors
+    conn.close()
+
+
+def test_a_passing_gate_keeps_the_node_and_records_its_verdict(tmp_path, monkeypatch):
+    import handlers
+    import worker
+    dbp = str(tmp_path / "gate-ok.db")
+    db.init_db(dbp)
+    conn = db.connect(dbp)
+    monkeypatch.setitem(handlers.HANDLERS, "pi",
+                        lambda payload, context=None: "built the thing")
+    tid = db.add_task(conn, "pi", json.dumps(
+        {"prompt": "x", "cwd": str(tmp_path), "test_command": "true"}),
+        max_retries=0)
+    worker.run_worker(dbp, "w0", max_idle_loops=2)
+    row = conn.execute("SELECT status, output_artifact FROM tasks WHERE id=?",
+                       (tid,)).fetchone()
+    assert row["status"] == "completed"
+    assert "built the thing" in row["output_artifact"]
+    assert "verify passed: true" in row["output_artifact"]
+    conn.close()
+
+
+def test_a_verify_node_runs_its_command_once_not_twice(tmp_path):
+    """For a `verify` node the test command IS the handler, so gating it again
+    would run a possibly non-idempotent suite twice."""
+    import worker
+    dbp = str(tmp_path / "gate-verify.db")
+    db.init_db(dbp)
+    conn = db.connect(dbp)
+    counter = tmp_path / "runs.txt"
+    db.add_task(conn, "verify", json.dumps(
+        {"test_command": f"echo run >> {counter}", "cwd": str(tmp_path)}),
+        max_retries=0)
+    worker.run_worker(dbp, "w0", max_idle_loops=2)
+    assert db.counts(conn)["completed"] == 1
+    assert counter.read_text().count("run") == 1, counter.read_text()
+    conn.close()

@@ -205,7 +205,26 @@ correct response (inspect, then either re-wait or intervene).
 
 ---
 
-## F7 — Node `model` may not be honoured — **SUSPECTED, reproduce before fixing**
+## F7 — Node `model` may not be honoured — **REPRODUCED 2026-07-30: not a routing bug**
+
+Traced end to end in `tests/test_models.py`: spec → queued payload → the `--model`
+the pane is actually launched with. Every path is honoured — friendly names, full
+ids, the per-role tier defaults, and the absent-model default. There is exactly
+one thing that changes a node's model after submission, and it is the retry
+escalation ladder, `kimi-k2.5` → `glm-5`. That is precisely the mismatch this
+report saw: a node the plan sent to kimi-k2.5 showing a `zai.glm-5` statusline was
+on attempt 2.
+
+The real defect was that this was **unfalsifiable from outside**.
+`escalate_payload` overwrote `data["model"]` in place, destroying the record of
+what had been asked for, so "ran on glm-5" and "asked for glm-5" were identical in
+the DB and on screen. Fixed: escalation now records `model_requested`, and the
+dashboard marks an escalated model `^glm-5` (with the `retry N` column beside it).
+No resolution code was changed, per the instruction below.
+
+The original report follows.
+
+---
 
 DAG submitted with `step5-generalise-timeout-warning` specified as `model: "kimi-k2.5"`.
 The pane the worker logged for that task (`task_id 2 ... native pane agents-4.%14`) showed a

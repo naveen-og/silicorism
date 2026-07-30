@@ -99,7 +99,12 @@ def _trunc(text: str, width: int, g: dict) -> str:
 
 
 def short_model(payload) -> str:
-    """Friendly model name from a task payload; '-' when absent or unparseable."""
+    """Friendly model name from a task payload; '-' when absent or unparseable.
+
+    A model the retry ladder chose is marked, not shown bare: a glm-5 node the
+    plan sent to kimi-k2.5 otherwise reads as misrouting, which is exactly the
+    confusion F7 recorded.
+    """
     try:
         data = json.loads(payload or "{}")
     except (json.JSONDecodeError, ValueError, TypeError):
@@ -109,7 +114,8 @@ def short_model(payload) -> str:
     model = data.get("model") or data.get("test_command")
     if not model:
         return "-"
-    return str(_SHORT.get(model, model)).split("/")[-1][:18]
+    name = str(_SHORT.get(model, model)).split("/")[-1][:18]
+    return f"^{name}" if data.get("model_requested") else name
 
 
 def node_name(row) -> str:

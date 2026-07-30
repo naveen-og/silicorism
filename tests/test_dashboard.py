@@ -385,3 +385,11 @@ def test_the_bar_never_draws_outside_its_own_box():
     for total in range(0, 9):
         assert sum(dashboard._allocate([4, 1, 2, 3], total)) == total, total
     assert dashboard._allocate([0, 0, 0, 0], 10) == [0, 0, 0, 0]
+
+
+def test_an_escalated_model_is_marked_not_shown_bare():
+    """A glm-5 node the plan sent to kimi-k2.5 otherwise reads as misrouting."""
+    asked = json.dumps({"model": "glm-5"})
+    escalated = json.dumps({"model": "glm-5", "model_requested": "kimi-k2.5"})
+    assert dashboard.short_model(asked) == "glm-5"
+    assert dashboard.short_model(escalated) == "^glm-5"

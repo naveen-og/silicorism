@@ -99,18 +99,38 @@ def _native_payload(task) -> str:
 
 
 def _gate_command(task) -> str | None:
-    """A pi node's own acceptance test, run by the worker — not by the agent.
+    """An agent node's own acceptance test, run by the worker, not by the agent.
 
     The pane's exit code says the agent process ended, not that the work is
     correct: autoexit.ts exits 0 for any run that settled without an error stop
     reason, so an agent that ran nothing at all still "succeeds". Seen for real:
     a node reported completed while its own test file had `fail 1`.
+
+    Agent types only. For a `verify` node the test command IS the handler, and
+    gating it again would run a possibly non-idempotent suite twice.
     """
+    if task["task_type"] not in handlers.NATIVE_AGENTS:
+        return None
     try:
         data = json.loads(task["payload"] or "{}")
     except (json.JSONDecodeError, ValueError):
         return None
     return data.get("test_command") if isinstance(data, dict) else None
+
+
+def _apply_gate(task, artifact: str) -> str:
+    """Append the node's gate verdict to its artifact; raise if the gate fails.
+
+    Both execution paths go through here. The gate used to live only in the
+    native pane branch, so a node carrying `test_command` was enforced or
+    ignored depending on whether SILICORISM_NATIVE happened to be set, with
+    nothing saying which you got.
+    """
+    gate = _gate_command(task)
+    if not gate:
+        return artifact
+    return artifact + "\n\n" + handlers.verify(json.dumps(
+        {"test_command": gate, "cwd": _task_cwd(task)}))
 
 
 def _timeouts(task) -> tuple[float, float]:
@@ -312,12 +332,9 @@ def _run_native(conn, task, agent_id, command: str) -> None:
         artifact = (tmux.read_log_tail(_artifact_path(tid), max_chars=4000)
                     or tmux.read_log_tail(logf)
                     or f"native pane {win} exit 0")
-        gate = _gate_command(task)
-        if gate:
-            # Raises on non-zero, so the except below fails the task: this is
-            # the only thing between a claimed pass and a real one.
-            artifact += "\n\n" + handlers.verify(json.dumps(
-                {"test_command": gate, "cwd": _task_cwd(task)}))
+        # Raises on non-zero, so the except below fails the task: this is the
+        # only thing between a claimed pass and a real one.
+        artifact = _apply_gate(task, artifact)
         db.complete_task(conn, tid, artifact=artifact)
         db.log(conn, tid, agent_id, f"completed (native): {win}")
     except Exception as err:
@@ -405,6 +422,7 @@ def run_worker(db_path: str, agent_id: str, *, idle_sleep: float = 0.1,
                     _run_native(conn, task, agent_id, native_cmd)
                 else:
                     result = handlers.run(task["task_type"], task["payload"], context)
+                    result = _apply_gate(task, result)
                     db.complete_task(conn, tid, artifact=result)
                     db.log(conn, tid, agent_id, f"completed: {result[:120]}")
                     _close_task_window(tid, failed=False)

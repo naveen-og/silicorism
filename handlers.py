@@ -72,6 +72,11 @@ def escalate_payload(task_type: str, payload: str) -> str | None:
         nxt = ESCALATION[0] if current != ESCALATION[0] else ESCALATION[1]
     except IndexError:  # already at the top rung
         return None
+    # Keep what was asked for. Overwriting `model` in place made escalation
+    # unfalsifiable from outside: a glm-5 pane for a node the plan sent to
+    # kimi-k2.5 was indistinguishable from misrouting, which is what left F7
+    # open for a week. setdefault, so a second rung still names the original.
+    data.setdefault("model_requested", data.get("model") or "default")
     data["model"] = nxt
     return json.dumps(data)
 

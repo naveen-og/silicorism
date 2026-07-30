@@ -1,5 +1,7 @@
 # Silicorism
 
+[![ci](https://github.com/naveen-og/silicorism/actions/workflows/ci.yml/badge.svg)](https://github.com/naveen-og/silicorism/actions/workflows/ci.yml)
+
 Silicon + Tribalism: a multi-agent task orchestrator that runs OSS coding models as
 live agents, side by side, in one tmux window. SQLite in WAL mode plus a pool of
 worker processes. Pure Python stdlib — no dependencies.
@@ -72,7 +74,7 @@ exists because the opposite happened in a real run.
 
 | Guarantee | Mechanism |
 |---|---|
-| A node cannot declare its own success | `test_command` on a pi node is run by the **worker** after the agent exits, and non-zero fails the node. A pane's exit code only says the process ended: `autoexit.ts` exits 0 for any run that settled, so an agent that did nothing still "succeeds". |
+| A node cannot declare its own success | `test_command` on an agent node is run by the **worker** after the agent exits, on both execution paths, and non-zero fails the node. A pane's exit code only says the process ended: `autoexit.ts` exits 0 for any run that settled, so an agent that did nothing still "succeeds". |
 | Nor can the pipeline | The chain ends in a `harness: "verify"` node holding the real test command, so no agent's claim can close the run. |
 | A wedged node is visible | The worker stamps `last_progress_at` from the newest mtime under the task's cwd, so a busy heartbeat is no longer the only signal. `get_status()` returns a `stalled` list; the dashboard shows `idle Nm`. |
 | A wedged node ends | `stall_timeout_s` (default 600) fails a node whose files stop changing. Without it a node that hung at minute 2 held its worker until the 3600s ceiling. `timeout_s` overrides that ceiling. |
@@ -81,6 +83,8 @@ exists because the opposite happened in a real run.
 | A dead pipeline is recoverable | `silicorism_gc(stuck=true)` force-fails `processing` rows that are stale by heartbeat *or* by progress; `silicorism_cancel_task` ends one node and kills its pane. Previously the only workaround was abandoning the database. |
 | An artifact belongs to its own run | Pane logs and artifacts are namespaced per DB and truncated before the pane opens. Both were keyed on the task id alone in one shared directory, and every DB numbers from 1 — so a node with no artifact of its own reported an unrelated run's pane text as output, and that output is handed to the next node as context. |
 | Retries never silently bill Claude | The escalation ladder is OSS-only: `kimi-k2.5` → `glm-5`, then the failure goes to the orchestrator. |
+| A model swap is never mistaken for misrouting | Escalation records `model_requested` instead of overwriting `model` in place, and the dashboard marks the running model `^glm-5`. Without it, a glm-5 pane for a node the plan sent to kimi-k2.5 is indistinguishable from a routing bug. |
+| The shipped package is what is here | A test asserts `py-modules` covers every top-level module and every console-script target is callable, and CI installs the package and drives it from outside the repo. `silicorism dashboard` shipped unable to start because the suite only ever ran from the repo, where CWD is on `sys.path`. |
 
 ## Native agents, harnesses & skills
 
@@ -197,7 +201,7 @@ fail the task and quarantine the worktree.
 ## Test
 
 ```bash
-python -m pytest tests/ -q         # 159 tests
+python -m pytest tests/ -q         # the whole suite; CI runs it on 3.10 and 3.14
 python tests/test_db.py            # 8 procs × writes, no busy, no double-claim
 python tests/test_integration.py   # 40-task pool drains, correct terminal states
 ```

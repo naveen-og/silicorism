@@ -1,0 +1,66 @@
+name: ci
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The floor from pyproject's requires-python, and the version it is
+        # developed on. There are no dependencies, so nothing in between can
+        # drift independently.
+        python: ["3.10", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      # tmux is only reached through mocks in the suite, but the tool is
+      # meaningless without it: install it so a test that does shell out fails
+      # here rather than on someone's machine.
+      - name: install tmux
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq tmux
+
+      - name: install
+        run: pip install -e . pytest
+
+      - name: tests
+        run: python -m pytest tests/ -q
+
+      # Real assertions that live outside pytest: tmux command strings, the
+      # model escalation ladder, the complexity tiers, skill resolution, the
+      # MCP tool schemas.
+      - name: module self-checks
+        run: |
+          for m in handlers silicorism_tools tmux_orchestrator skills silicorism_mcp; do
+            echo "--- $m"
+            python "$m.py"
+          done
+
+      # The installed console script imports its siblings from an entry point,
+      # not from CWD. `silicorism dashboard` shipped broken for exactly this
+      # reason, and running from the repo cannot see it.
+      - name: the installed command works from outside the repo
+        run: |
+          cd /tmp
+          silicorism --help > /dev/null
+          silicorism verify
+          silicorism init --db /tmp/ci.db
+          silicorism add --db /tmp/ci.db --type echo --payload hello
+          silicorism run --db /tmp/ci.db --workers 2 --drain --quiet
+          silicorism status --db /tmp/ci.db
+          python -c "import cli, dashboard; print(dashboard.__file__)"
+
+      - name: the MCP server answers a handshake
+        run: |
+          cd /tmp
+          printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
+            | silicorism mcp | tee /dev/stderr | grep -q '"serverInfo"'
