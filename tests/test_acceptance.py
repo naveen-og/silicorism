@@ -262,3 +262,26 @@ def test_an_injected_skill_says_where_its_other_files_are(tmp_path):
         pytest.skip("coding-excellence is not installed on this machine")
     text = skills.load_skills(["coding-excellence"], cwd=str(tmp_path))
     assert "skill files are in /" in text
+
+
+def test_build_dag_does_not_force_a_base_branch(tmp_path):
+    """The submit layer's own default used to win: every payload carried
+    base="main", so handlers._default_base never got a say and a repo on
+    `master` failed at node one. Caught by a live run, not by the unit tests."""
+    conn, path = _conn(tmp_path)
+    repo = _git_repo(tmp_path)
+    st.build_dag(conn, path, [{"id": "b", "prompt": "x", "model": "kimi-k2.5"}],
+                 name="feat", cwd=str(repo))
+    row = conn.execute(
+        "SELECT payload FROM tasks WHERE task_type = 'worktree_create'").fetchone()
+    assert "base" not in json.loads(row["payload"])
+
+
+def test_an_explicit_base_is_still_honoured(tmp_path):
+    conn, path = _conn(tmp_path)
+    repo = _git_repo(tmp_path)
+    st.build_dag(conn, path, [{"id": "b", "prompt": "x", "model": "kimi-k2.5"}],
+                 name="feat", base="release", cwd=str(repo))
+    row = conn.execute(
+        "SELECT payload FROM tasks WHERE task_type = 'worktree_create'").fetchone()
+    assert json.loads(row["payload"])["base"] == "release"

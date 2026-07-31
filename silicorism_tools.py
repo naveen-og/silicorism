@@ -353,7 +353,7 @@ def _check_requires_spec(nid: str, spec) -> None:
             raise ValueError(f"node {nid!r}: requires.min_lines[{path!r}] must be an integer")
 
 
-def build_dag(conn, db_path, nodes, *, name=None, base="main", cwd=None) -> dict:
+def build_dag(conn, db_path, nodes, *, name=None, base=None, cwd=None) -> dict:
     """Submit an arbitrary agent DAG. Each node is a dict:
 
         {id, prompt, depends_on?, harness?("pi"|"verify"), model?, thinking?,
@@ -397,9 +397,13 @@ def build_dag(conn, db_path, nodes, *, name=None, base="main", cwd=None) -> dict
         # with `silicorism_gc` unable to clear the pending rows behind it.
         _assert_git_repo(repo)
         work_path = os.path.join(WORKTREE_ROOT, name)
-        wt_task = db.add_task(conn, "worktree_create",
-                              json.dumps({"branch": name, "base": base, "db": db_path,
-                                          "repo": repo}),
+        # base stays absent unless asked for: an explicit "main" here is a guess
+        # about someone else's repo, and it silently beats the handler's default
+        # of that repo's own current branch.
+        wt_payload = {"branch": name, "db": db_path, "repo": repo}
+        if base:
+            wt_payload["base"] = base
+        wt_task = db.add_task(conn, "worktree_create", json.dumps(wt_payload),
                               worktree_path=work_path)
 
     id_map: dict[str, int] = {}
