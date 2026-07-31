@@ -51,7 +51,16 @@ def load_skills(names, cwd: str | None = None, max_chars: int = 4000) -> str:
             text = open(path, encoding="utf-8", errors="replace").read().strip()
         except OSError:
             continue
-        parts.append(f"### Skill: {name}\n{text[:max_chars]}")
+        # A skill is a directory, not a file: coding-excellence's SKILL.md is a
+        # 2 KB index whose first instruction is "read CORE.md now", and CORE.md
+        # is the other 22 KB. A node launched with discovery off cannot find a
+        # relative filename, so the injected text used to be a pointer to
+        # nothing. Naming the directory makes the rest of the skill reachable
+        # with the file tools the node already has.
+        home = os.path.dirname(path)
+        parts.append(f"### Skill: {name}\n"
+                     f"(skill files are in {home} — read the ones this text tells "
+                     f"you to read before starting)\n{text[:max_chars]}")
     return "--- Skills ---\n" + "\n\n".join(parts) if parts else ""
 
 

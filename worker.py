@@ -71,12 +71,21 @@ def _artifact_path(task_id) -> str:
     return _capture_path(task_id) + ".artifact"
 
 
+def _usage_path(task_id) -> str:
+    """Token counts written by autoexit.ts when the agent settles."""
+    return _capture_path(task_id) + ".usage"
+
+
 def _clear_capture(task_id) -> None:
     """Empty a task's log and artifact before its pane opens.
 
     Namespacing is not quite enough on its own: dropping a DB restarts the ids,
     so a second run in the same repo would still find the first run's files.
     """
+    try:
+        os.remove(_usage_path(task_id))
+    except OSError:
+        pass
     for path in (_capture_path(task_id), _artifact_path(task_id)):
         try:
             open(path, "w").close()
@@ -84,7 +93,7 @@ def _clear_capture(task_id) -> None:
             pass
 
 
-def _native_payload(task) -> str:
+def _native_payload(task, *, conn=None) -> str:
     """Task payload with the artifact path injected for pi TUI runs."""
     if task["task_type"] != "pi":
         return task["payload"]
@@ -95,6 +104,15 @@ def _native_payload(task) -> str:
     except (json.JSONDecodeError, ValueError):
         return task["payload"]
     data["artifact"] = _artifact_path(task["id"])
+    data["usage"] = _usage_path(task["id"])
+    # Mail waiting at launch goes into the prompt. The channel was pull-only,
+    # and nothing downstream ever stopped mid-run to go and look, so a peer's
+    # answer sat unread until the DAG was over. Drained here, so a later
+    # `silicorism-msg poll` does not replay what the prompt already shows.
+    if conn is not None and data.get("agent_id"):
+        pending = db.poll_inter_agent_messages(conn, data["agent_id"])
+        if pending:
+            data["inbox"] = [f"{m['sender_id']}: {m['content']}" for m in pending]
     # tmux sets the pane's cwd, but the command builder needs it too, to see
     # whether the repo has a context file worth passing. A worktree node carries
     # that path on the row rather than in the payload.
@@ -122,6 +140,18 @@ def _gate_command(task) -> str | None:
     return data.get("test_command") if isinstance(data, dict) else None
 
 
+def _requires_spec(task) -> dict:
+    """The node's declared deliverables, or {} when it declared none."""
+    if task["task_type"] not in handlers.NATIVE_AGENTS:
+        return {}
+    try:
+        data = json.loads(task["payload"] or "{}")
+    except (json.JSONDecodeError, ValueError):
+        return {}
+    spec = data.get("requires") if isinstance(data, dict) else None
+    return spec if isinstance(spec, dict) else {}
+
+
 def _apply_gate(task, artifact: str) -> str:
     """Append the node's gate verdict to its artifact; raise if the gate fails.
 
@@ -129,7 +159,22 @@ def _apply_gate(task, artifact: str) -> str:
     native pane branch, so a node carrying `test_command` was enforced or
     ignored depending on whether SILICORISM_NATIVE happened to be set, with
     nothing saying which you got.
+
+    Two gates, in this order. `requires` is checked first because it catches
+    what a test suite structurally cannot: a deliverable that was never
+    written. Tests only fail on what they cover, so a node that quietly skipped
+    half its prompt — capped a list at 3 where the spec said 6, stubbed a
+    function with `TODO`, dropped the test it was told to add — passes a green
+    suite and reports success. Checking the plan's own words costs one stat and
+    one substring search per claim.
     """
+    unmet = handlers.check_requires(_requires_spec(task), _task_cwd(task))
+    if unmet:
+        raise handlers.RequirementsUnmet(
+            "declared deliverables missing:\n- " + "\n- ".join(unmet))
+    if unmet == [] and _requires_spec(task):
+        artifact += "\n\nrequires: all declared deliverables present"
+
     gate = _gate_command(task)
     if not gate:
         return artifact
@@ -301,6 +346,31 @@ def _stop_and_beat(conn, agent_id, task_id, cwd, *, every: float = 30.0,
     return poll
 
 
+def _record_usage(conn, tid) -> None:
+    """Bank the token counts autoexit.ts left behind, if it left any.
+
+    Absent is normal — a claude-harness node, a pane killed before it settled,
+    an older extension — so nothing here may turn into a task failure.
+    """
+    try:
+        with open(_usage_path(tid)) as fh:
+            u = json.load(fh)
+        if not isinstance(u, dict):
+            return
+    except (OSError, json.JSONDecodeError, ValueError):
+        return
+    provider, model = u.get("provider"), u.get("model") or ""
+    name = f"{provider}/{model}" if provider else model
+    try:
+        db.record_usage(conn, tid,
+                        input_tokens=u.get("input") or 0,
+                        output_tokens=u.get("output") or 0,
+                        cost_usd=handlers.usage_cost(name, u),
+                        model_used=name)
+    except Exception:  # telemetry must never fail the node it measures
+        pass
+
+
 def _run_native(conn, task, agent_id, command: str) -> None:
     """Execute an agent live in a tmux pane; raise on non-zero/absent exit."""
     tid = task["id"]
@@ -351,6 +421,9 @@ def _run_native(conn, task, agent_id, command: str) -> None:
             _kill_pane(pane, win)
         raise
     finally:
+        # Tokens a failed node burnt were still paid for, so this runs on every
+        # exit path, not just the happy one.
+        _record_usage(conn, tid)
         # pipe-pane records every repaint; four agents left 13 MB behind once,
         # and a failing run left 137 MB — so this trims on every exit path.
         tmux.trim_log(logf)
@@ -417,7 +490,8 @@ def run_worker(db_path: str, agent_id: str, *, idle_sleep: float = 0.1,
             context = db.dep_artifacts(conn, tid)
             # SILICORISM_NATIVE: pi/claude tasks run as live CLI processes in a pane.
             native_cmd = (handlers.native_command(
-                task["task_type"], _native_payload(task), context, cli_path=_CLI)
+                task["task_type"], _native_payload(task, conn=conn), context,
+                cli_path=_CLI)
                 if _NATIVE else None)
             if native_cmd is None:
                 _open_task_window(db_path, task)

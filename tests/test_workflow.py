@@ -291,7 +291,7 @@ def test_gc_cleans_passed_keeps_quarantined(run, tmp_path):
 
 def test_native_command_pi_with_p2p():
     cmd = handlers.native_command("pi", json.dumps({
-        "prompt": "build it", "model": "hy3", "agent_id": "fixer-x",
+        "prompt": "build it", "model": "glm-5", "agent_id": "fixer-x",
         "db": "/tmp/x.db", "p2p": True}))
     assert cmd.startswith("export SILICORISM_DB=")
     assert "SILICORISM_SELF=fixer-x" in cmd
@@ -300,7 +300,7 @@ def test_native_command_pi_with_p2p():
     # Asserted as parts, not as one fixed sequence: the isolation flags sit
     # between them (see tests/test_isolation.py).
     assert "autoexit.ts" in cmd and "--no-session" in cmd
-    assert "--model opencode/hy3-free" in cmd
+    assert "--model bedrock-mantle/zai.glm-5" in cmd
     assert " -p " not in cmd
     assert "build it" in cmd
 
@@ -318,7 +318,8 @@ def test_native_command_claude_and_nonnative():
 def test_native_command_claude_custom_model():
     c = handlers.native_command("claude", json.dumps({
         "prompt": "review", "model": "opus-4.8"}))
-    assert "claude -p --model opus-4.8" in c
+    assert c.startswith("claude -p ")
+    assert "--model opus-4.8" in c
 
 
 def test_skill_injection_into_prompt(tmp_path):
@@ -460,7 +461,7 @@ def test_build_dag_wires_deps_and_attrs(tmp_path):
     conn = db.connect(dbp)
     nodes = [
         {"id": "scout", "prompt": "recon", "model": "opencode/deepseek-v4-flash-free",
-         "thinking": "high", "skills": ["tdd"]},
+         "thinking": "max", "skills": ["tdd"]},
         {"id": "build", "prompt": "impl", "depends_on": ["scout"],
          "harness": "claude"},
     ]
@@ -474,7 +475,7 @@ def test_build_dag_wires_deps_and_attrs(tmp_path):
     sp = json.loads(conn.execute("SELECT payload FROM tasks WHERE id=?",
                                  (out["nodes"]["scout"],)).fetchone()["payload"])
     assert sp["model"] == "opencode/deepseek-v4-flash-free"
-    assert sp["thinking"] == "high" and sp["skills"] == ["tdd"]
+    assert sp["thinking"] == "max" and sp["skills"] == ["tdd"]
     # harness "claude" is coerced to "pi" so execution never routes to a Claude model
     bt = conn.execute("SELECT task_type FROM tasks WHERE id=?",
                       (out["nodes"]["build"],)).fetchone()["task_type"]

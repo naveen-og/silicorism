@@ -73,7 +73,18 @@ INSTRUCTIONS = (
     "exits and fails the node on non-zero, so a node cannot report a success "
     "its tests do not support. Give a slow node `stall_timeout_s` (default "
     "600) — a node whose files stop changing for that long is failed instead "
-    "of held to the 3600s ceiling.\n\nYOU are the orchestrator: you ask the questions, write the plan and gate the "
+    "of held to the 3600s ceiling.\n"
+    "Green tests do not prove the work was done: they only fail on what they "
+    "cover, so a node that skipped half its prompt still passes. Give every "
+    "building node a `requires` block — the files it must create, the symbols "
+    "that must appear in them, the placeholders (`TODO`, `unimplemented!`) it "
+    "must not leave behind — and the worker checks those literally before the "
+    "tests run. Write them from the plan's own acceptance criteria.\n"
+    "For anything with testable behaviour, order the DAG red-green: a node "
+    "that writes the failing test, a `verify` node with `expect_fail: true` "
+    "proving it fails, the node that implements, then a normal `verify`. A "
+    "test that passes before the code exists is asserting nothing, and this is "
+    "the only way the pipeline can tell.\n\nYOU are the orchestrator: you ask the questions, write the plan and gate the "
     "results yourself. Never delegate the planning or the implementation to another "
     "Claude agent or subagent — the execution nodes are pi agents on OSS models, and "
     "that is the only place work runs."
@@ -284,6 +295,34 @@ TOOLS = [
                             "thinking": {"type": "string",
                                          "description": "off|minimal|low|medium|high|xhigh|max"},
                             "skills": {"type": "array", "items": {"type": "string"}},
+                            "writes": {"type": "array", "items": {"type": "string"},
+                                       "description": "files this node claims; two "
+                                       "unordered nodes claiming one file is rejected"},
+                            "expect_fail": {"type": "boolean",
+                                            "description": "verify nodes only: require "
+                                            "a NON-zero exit. Put one after the node "
+                                            "that writes the tests and before the node "
+                                            "that implements, so a test that passes "
+                                            "against unwritten code fails the run "
+                                            "where it was written"},
+                            "requires": {
+                                "type": "object",
+                                "description": "deliverables the worker checks "
+                                "literally after this node exits, before the tests. "
+                                "Tests never catch what was never written; this does.",
+                                "properties": {
+                                    "files": {"type": "array", "items": {"type": "string"},
+                                              "description": "paths that must exist and be non-empty"},
+                                    "symbols": {"type": "object",
+                                                "description": "path -> substrings that must "
+                                                "appear in it, e.g. \"func ValidateJWT\""},
+                                    "absent": {"type": "object",
+                                               "description": "path -> substrings that must NOT "
+                                               "appear, e.g. \"TODO\", \"unimplemented!\""},
+                                    "min_lines": {"type": "object",
+                                                  "description": "path -> minimum line count"},
+                                },
+                            },
                         },
                         "required": ["id"],  # a verify node carries test_command
                     },

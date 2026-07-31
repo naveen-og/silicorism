@@ -20,10 +20,10 @@ def _proc(returncode=0, stdout="ok", stderr=""):
 
 
 def test_resolve_model_aliases():
-    assert handlers.resolve_model("mimo-2.5") == "opencode/mimo-v2.5-free"
-    assert handlers.resolve_model("nemotron-3-ultra") == "opencode/nemotron-3-ultra-free"
+    assert handlers.resolve_model("kimi-k2.5") == "bedrock-mantle/moonshotai.kimi-k2.5"
+    assert handlers.resolve_model("deepseek-v4-flash") == "opencode/deepseek-v4-flash-free"
     # full opencode ids and unknown strings pass through untouched
-    assert handlers.resolve_model("opencode/hy3-free") == "opencode/hy3-free"
+    assert handlers.resolve_model("bedrock-mantle/zai.glm-5") == "bedrock-mantle/zai.glm-5"
     assert handlers.resolve_model("gpt-4o") == "gpt-4o"
     assert handlers.resolve_model(None) is None
 
@@ -32,11 +32,15 @@ def test_resolve_model_aliases():
 def test_pi_full_payload(run):
     run.return_value = _proc(stdout="done")
     out = handlers.run("pi", json.dumps({
-        "prompt": "hi", "model": "hy3", "thinking": "max", "cwd": "/work"}))
+        "prompt": "hi", "model": "glm-5", "thinking": "max", "cwd": "/work"}))
     assert out == "done"
     # friendly name resolves to the opencode free id
-    assert run.call_args.args[0] == [
-        "pi", "-p", "--model", "opencode/hy3-free", "--thinking", "max", "hi"]
+    argv = run.call_args.args[0]
+    assert argv[:6] == [
+        "pi", "-p", "--model", "bedrock-mantle/zai.glm-5", "--thinking", "max"]
+    # The prompt is last and starts with what was asked for; the default skill
+    # text is appended to it (handlers.DEFAULT_SKILLS).
+    assert argv[-1].startswith("hi")
     assert run.call_args.kwargs["cwd"] == "/work"
 
 
@@ -44,7 +48,9 @@ def test_pi_full_payload(run):
 def test_pi_defaults(run):
     run.return_value = _proc()
     handlers.run("pi", json.dumps({"prompt": "go"}))
-    assert run.call_args.args[0] == ["pi", "-p", "--model", handlers.DEFAULT_PI_MODEL, "go"]
+    argv = run.call_args.args[0]
+    assert argv[:4] == ["pi", "-p", "--model", handlers.DEFAULT_PI_MODEL]
+    assert argv[-1].startswith("go")
     assert run.call_args.kwargs["cwd"] is None
 
 
@@ -52,7 +58,9 @@ def test_pi_defaults(run):
 def test_pi_fallback_string(run):
     run.return_value = _proc()
     handlers.run("pi", "just a prompt")
-    assert run.call_args.args[0] == ["pi", "-p", "--model", handlers.DEFAULT_PI_MODEL, "just a prompt"]
+    argv = run.call_args.args[0]
+    assert argv[:4] == ["pi", "-p", "--model", handlers.DEFAULT_PI_MODEL]
+    assert argv[-1].startswith("just a prompt")
 
 
 @patch("handlers.subprocess.run")
@@ -71,7 +79,9 @@ def test_claude_payload(run):
     run.return_value = _proc(stdout="summary")
     out = handlers.run("claude", json.dumps({"prompt": "review", "cwd": "/repo"}))
     assert out == "summary"
-    assert run.call_args.args[0] == ["claude", "-p", "review"]
+    argv = run.call_args.args[0]
+    assert argv[:2] == ["claude", "-p"]
+    assert argv[-1].startswith("review")
     assert run.call_args.kwargs["cwd"] == "/repo"
 
 

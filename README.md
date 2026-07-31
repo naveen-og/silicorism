@@ -62,6 +62,9 @@ time, pane, and `idle Nm` once a running node's files have stopped changing.
 Below it: which workers are still beating (`DEAD` when one is not), the actual
 failure line rather than a pointer to the logs, and the P2P feed.
 
+Once a node reports usage, a third header line shows what the run burnt and
+what it avoided — `12.4k in / 3.1k out   spent $0.00   saved $0.14`.
+
 Running nodes spin, so a frozen monitor is never mistaken for a quiet queue. A
 long run folds its finished nodes into `N done` instead of pushing the live ones
 off screen. `q` quits; glyphs fall back to ASCII off a UTF-8 locale or under
@@ -76,6 +79,10 @@ exists because the opposite happened in a real run.
 |---|---|
 | A node cannot declare its own success | `test_command` on an agent node is run by the **worker** after the agent exits, on both execution paths, and non-zero fails the node. A pane's exit code only says the process ended: `autoexit.ts` exits 0 for any run that settled, so an agent that did nothing still "succeeds". |
 | Nor can the pipeline | The chain ends in a `harness: "verify"` node holding the real test command, so no agent's claim can close the run. |
+| Nor can green tests | A node may declare `requires` — files that must exist, symbols that must appear in them, placeholders (`TODO`, `unimplemented`) that must not, minimum line counts — and the **worker** checks them literally after the agent exits, before the tests. Tests only fail on what they cover, so every defect that survived a green gate here was an absence: a list capped at 3 where the spec said 6, a function imported by the tests and never called, a feature stubbed as a no-op with its test dropped. No suite could have caught any of them. |
+| A new test is a real test | `expect_fail: true` on a `verify` node requires a **non-zero** exit. Put one between the node that writes the test and the node that implements it, and a test that passes against unwritten code fails the run where it was written instead of certifying it four nodes later. |
+| A worktree is created in the repo it belongs to | `worktree_create` runs git in the DAG's `cwd`, and `build_dag` rejects a named DAG whose `cwd` is not inside a repository. `git worktree add` used to run wherever the worker was started: for a worker launched from a home directory that is `fatal: not a git repository`, and the failed node then blocked every dependent forever. The base branch defaults to the repo's own current branch rather than a guessed `main`. |
+| Discipline is the floor, not an opt-in | Every agent node gets `coding-excellence` unless it names its own `skills` (`[]` means none). And an injected skill now carries its directory: `coding-excellence`'s SKILL.md opens with "read CORE.md now", and a node launched with discovery off cannot resolve a bare filename — the injection was a pointer to nothing. |
 | A wedged node is visible | The worker stamps `last_progress_at` from the newest mtime under the task's cwd, so a busy heartbeat is no longer the only signal. `get_status()` returns a `stalled` list; the dashboard shows `idle Nm`. |
 | A wedged node ends | `stall_timeout_s` (default 600) fails a node whose files stop changing. Without it a node that hung at minute 2 held its worker until the 3600s ceiling. `timeout_s` overrides that ceiling. |
 | A killed agent takes its children with it | The pane's launch script traps `HUP`/`INT`/`TERM` and signals its whole process group, so a timed-out node does not leave `gopls` and `pyright-langserver` resident. |
@@ -85,8 +92,66 @@ exists because the opposite happened in a real run.
 | Retries never silently bill Claude | The escalation ladder is OSS-only: `kimi-k2.5` → `glm-5`, then the failure goes to the orchestrator. |
 | A model swap is never mistaken for misrouting | Escalation records `model_requested` instead of overwriting `model` in place, and the dashboard marks the running model `^glm-5`. Without it, a glm-5 pane for a node the plan sent to kimi-k2.5 is indistinguishable from a routing bug. |
 | A node runs on the plan, not on the machine | pi nodes launch with `-nc -ne -ns -np`, so they do not discover the operator's global `CLAUDE.md`, skills, prompt templates or installed extensions. Measured on one five-word prompt: **13,999 input tokens with discovery on, 1,837 without** — paid every turn of every node, and different on every machine. The repo's own `AGENTS.md`/`CLAUDE.md` is added back deliberately by path, so a node keeps its project's conventions and none of the operator's. |
+| A `claude` node is isolated too | The same contract in that CLI's flags: `--setting-sources project` drops the operator's global settings, skills and hooks; `--strict-mcp-config` with no `--mcp-config` leaves the node zero MCP servers (the `-ne` case); `--no-session-persistence` keeps a one-shot node out of the resume history. Narrower than pi's, not equal: no flag suppresses the user-level `CLAUDE.md`. |
+| The cost claim is measured, not asserted | `autoexit.ts` sums each response's `usage` (deduped by `responseId`, since `agent_end` re-delivers the whole conversation) and the worker banks it per task — on failed runs too, because those tokens were paid for. The dashboard and `silicorism_get_status` show tokens, spend, and **saved**: the same tokens priced at the planner's own rate, which is the only number that says whether the architecture pays for itself. Gateway spend reads `$0.00` because bedrock-mantle publishes no price metadata and the opencode models are free tier — that is a measurement, not an estimate. |
+| An edge carries a summary, not a transcript | A node ends with a `--- HANDOFF ---` block (files, added, decisions, open) and only that block is put in front of its dependents; a node that forgets the format falls back to a bounded tail rather than its whole output. One live run spent 10,072 input tokens on a node whose job was to append a single function, nearly all of it its parent's prose. |
+| Two nodes cannot race for one file | A node may declare `writes: [...]`. `build_dag` rejects a DAG where two nodes claim the same file and neither is an ancestor of the other, and tells the node which files are its own. Two builders once appended to one `calc.py` in one worktree simultaneously and both edits survived on luck. Undeclared nodes are not policed — the claim is a declaration, not a discovery. |
+| Mail arrives without being asked for | Messages waiting when a node launches are drained into its prompt instead of sitting until someone polls. The channel was pull-only and nothing downstream ever stopped mid-run to look. |
 | A worker cannot start its own runs | `extensions/silicorism.ts` registers `silicorism_plan_and_submit` and `install-extension` puts it in `~/.pi/extensions`, so every execution node used to discover the orchestrator's own tools. `-ne` removes them; the explicit `-e autoexit.ts` still loads. |
 | The shipped package is what is here | A test asserts `py-modules` covers every top-level module and every console-script target is callable, and CI installs the package and drives it from outside the repo. `silicorism dashboard` shipped unable to start because the suite only ever ran from the repo, where CWD is on `sys.path`. |
+
+## Splice: gated edits
+
+If a [splice](https://github.com/) checkout is present, every pi node gets
+`read_scope_map` and `splice_edit` loaded by explicit `-e` path — the same way
+`autoexit.ts` arrives, so `-ne` stays on and the node still discovers nothing on
+its own. Splice edits by AST anchor (`#Name@hash`, the hash being a staleness
+check) through a shadow VFS behind an **LSP delta gate**: an edit that
+introduces a new diagnostic is rejected instead of committed. Splice's own
+`system-prompt-overlay.md` is appended alongside the repo's context file,
+because a weak model ignores a tool it was never told to prefer.
+
+Preferred, not enforced: pi's `write`/`edit` stay available, so a node blocked
+by a splice rejection can still finish.
+
+Found via `SILICORISM_SPLICE`, else `~/.pi/agent/extensions/splice`, else
+`~/Projects/splice`. Setting the variable to anything that is not a checkout
+(`SILICORISM_SPLICE=off`) turns it off.
+
+**Reading a file through splice is far cheaper than reading the file.**
+`read_scope_map` returns anchors and the file's indentation, not bodies; a body
+comes back only for anchors named in `include`. Measured against the raw source:
+
+| file | raw bytes | scope map | ratio |
+|---|---|---|---|
+| `src/targeting.ts` | 3,211 | 496 | 6.4× |
+| `src/shadow-vfs.ts` | 6,293 | 1,956 | 3.2× |
+| `src/cst-indexer.ts` | 17,225 | 1,347 | 12.8× |
+| `src/smart-patch-engine.ts` | 23,388 | 797 | 29.3× |
+
+**But the per-turn overhead is fixed and it dominates on small files.** The
+overlay (2,653 bytes) and two tool schemas (2,077 bytes) are re-sent every turn,
+about 1,180 tokens, whatever the file is. On the same six-node DAG over a
+three-function `calc.py` — where the scope map saves almost nothing because the
+file is tiny:
+
+| | splice off | splice on |
+|---|---|---|
+| **total input** | **23,281** | **29,778** |
+
+Break-even is roughly a 150-line file. Below that splice costs more than it
+saves and only the gate justifies it; above it, splice is the cheapest way to
+look at code in the toolbox. `calc.py` is the wrong benchmark for it — it is
+here to prove the wiring, not the economics.
+
+For the planner side, register the MCP server with Claude Code:
+
+```bash
+claude mcp add splice -- node ~/Projects/splice/src/mcp/main.ts
+```
+
+Node 26 strips the types, so there is no build step; verified by answering a
+`tools/list` with `read_scope_map` and `splice_edit`.
 
 ## Native agents, harnesses & skills
 
@@ -131,9 +196,15 @@ lets the orchestrator resubmit a corrective DAG and re-run until satisfied.
 Default per-role models are the **bedrock-mantle OSS pair** (`thinking: high`):
 scout `zai.glm-5`, builder and fixer `moonshotai.kimi-k2.5` — all overridable per
 node. Friendly names (`kimi-k2.5`, `glm-5`, `deepseek-v4-flash`,
-`nemotron-3-ultra`, `hy3`, `mimo-2.5`, `north-mini-code`, `qwen3-coder-480b`)
-resolve to full ids; full ids pass through. Nothing routes onto
-`qwen3-coder-480b` by default — it stays reachable only by asking for it.
+`qwen3-coder-480b`) resolve to full ids.
+
+The roster is closed. `handlers.ALLOWED_MODELS` is the whole set a node may run
+on, with the thinking levels each is allowed at — `kimi-k2.5` and `glm-5` at
+`medium` or `high`, `deepseek-v4-flash` only at `max`. Anything else, including
+a full id typed by hand, is rejected by `build_dag` at submission instead of
+dying at CLI startup in a pane. The rest of the opencode free tier was removed
+on 2026-07-30: their output was not worth the orchestration around it. Nothing
+routes onto `qwen3-coder-480b`, and it is not on the roster.
 
 **Complexity tiers.** `silicorism_plan_and_submit` takes
 `complexity: simple | standard | complex`, so a small program does not get a
@@ -208,6 +279,14 @@ fail the task and quarantine the worktree.
 python -m pytest tests/ -q         # the whole suite; CI runs it on 3.10 and 3.14
 python tests/test_db.py            # 8 procs × writes, no busy, no double-claim
 python tests/test_integration.py   # 40-task pool drains, correct terminal states
+```
+
+The suite mocks the agent away, which proves the plumbing and nothing about
+whether a free model can finish a node. One test runs the real thing — six
+nodes, four OSS models, live tmux panes — and is opt-in so CI stays offline:
+
+```bash
+SILICORISM_INVIVO=1 python -m pytest tests/test_invivo_dag.py -s
 ```
 
 `handlers.py`, `silicorism_tools.py`, `tmux_orchestrator.py`, `skills.py` and

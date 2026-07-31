@@ -59,8 +59,8 @@ def test_a_full_id_and_a_friendly_name_reach_the_same_place():
         assert _launched_model(json.dumps({"prompt": "x", "model": spec})) == KIMI
     # An unknown name is passed through rather than silently swapped, so a typo
     # surfaces as the model that ran instead of looking like the default.
-    assert _launched_model(json.dumps({"prompt": "x", "model": "hy3"})) \
-        == "opencode/hy3-free"
+    assert _launched_model(json.dumps({"prompt": "x", "model": "glm-5"})) \
+        == "bedrock-mantle/zai.glm-5"
     assert _launched_model(json.dumps({"prompt": "x", "model": "nope-9"})) == "nope-9"
 
 
@@ -119,3 +119,46 @@ def test_the_built_in_tiers_use_the_documented_models(tmp_path):
         assert scouts == [GLM], seen
     finally:
         conn.close()
+
+
+# --- the roster -------------------------------------------------------------
+
+def test_only_the_two_workhorses_and_deepseek_are_on_the_roster():
+    """One vetted model set, so a plan cannot route a node onto a model whose
+    output nobody has looked at."""
+    assert set(handlers.ALLOWED_MODELS) == {
+        KIMI, GLM, "opencode/deepseek-v4-flash-free"}
+
+
+def test_an_off_roster_model_is_rejected_at_submission(tmp_path):
+    """It used to reach a pane and die at CLI startup, which reads as an
+    orchestrator bug rather than a bad plan."""
+    dbp = str(tmp_path / "roster.db")
+    db.init_db(dbp)
+    conn = db.connect(dbp)
+    try:
+        for bad in ("opencode/mimo-v2.5-free", "gpt-4o", "claude-opus-5"):
+            try:
+                silicorism_tools.build_dag(
+                    conn, dbp, [{"id": "n", "prompt": "x", "model": bad}])
+            except ValueError as err:
+                assert "roster" in str(err), err
+            else:
+                raise AssertionError(f"{bad} was accepted")
+    finally:
+        conn.close()
+
+
+def test_thinking_is_pinned_per_model():
+    """glm/kimi earn their keep at medium or high; deepseek only at max."""
+    assert handlers.check_model("glm-5", "medium") == (GLM, "medium")
+    assert handlers.check_model("kimi-k2.5", None) == (KIMI, "high")
+    assert handlers.check_model("deepseek-v4-flash", None)[1] == "max"
+    for model, level in (("glm-5", "low"), ("kimi-k2.5", "max"),
+                         ("deepseek-v4-flash", "high")):
+        try:
+            handlers.check_model(model, level)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"{model} accepted {level}")

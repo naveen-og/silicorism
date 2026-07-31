@@ -20,6 +20,12 @@ WORKTREE_ROOT = "/tmp/worktrees"
 # Task types that run as native CLI agents in a live tmux pane (SILICORISM_NATIVE).
 NATIVE_AGENTS = ("pi", "claude")
 
+# Injected into every agent node that does not state its own `skills`. The
+# execution models are smaller than the planner, and this is the cheapest place
+# to put the floor under them: read before editing, root cause over symptom,
+# smallest correct diff, no "done" without pasted output.
+DEFAULT_SKILLS = ("coding-excellence",)
+
 DEFAULT_PI_MODEL = "bedrock-mantle/moonshotai.kimi-k2.5"
 
 # autoexit.ts: lets a worker pane run the full pi TUI and still yield a
@@ -33,13 +39,43 @@ MODEL_ALIASES = {
     "qwen3-coder-480b": "bedrock-mantle/qwen.qwen3-coder-480b-a35b-instruct",
     "kimi-k2.5": "bedrock-mantle/moonshotai.kimi-k2.5",
     "glm-5": "bedrock-mantle/zai.glm-5",
+    # The one opencode free model kept, and only at max thinking. The rest of
+    # that tier (nemotron, laguna, ling, mimo, north-mini) was removed on
+    # 2026-07-30: the live six-node run showed their output was not worth the
+    # orchestration around it, and hy3 had already been dropped upstream.
     "deepseek-v4-flash": "opencode/deepseek-v4-flash-free",
-    "nemotron-3-ultra": "opencode/nemotron-3-ultra-free",
-    "hy3": "opencode/hy3-free",
-    "mimo-2.5": "opencode/mimo-v2.5-free",
-    "mimo-v2.5": "opencode/mimo-v2.5-free",
-    "north-mini-code": "opencode/north-mini-code-free",
 }
+
+# What a DAG node is allowed to run on. Everything else — including a full id
+# typed by hand, which resolve_model passes through untouched — is rejected at
+# submission rather than discovered when the pane dies.
+ALLOWED_MODELS = {
+    "bedrock-mantle/moonshotai.kimi-k2.5": ("medium", "high"),
+    "bedrock-mantle/zai.glm-5": ("medium", "high"),
+    # Only earns its place at max; below that it is not worth a node.
+    "opencode/deepseek-v4-flash-free": ("max",),
+}
+DEFAULT_THINKING_FOR = {m: levels[-1] for m, levels in ALLOWED_MODELS.items()}
+
+
+def check_model(model: str | None, thinking: str | None) -> tuple[str, str]:
+    """Resolve a node's (model, thinking), or raise if it is off the roster.
+
+    The roster is the point: a plan that names a model nobody vetted used to
+    reach a pane and die there, and the operator read that as an orchestrator
+    bug. Rejecting at submission puts the error where the mistake was made.
+    """
+    resolved = resolve_model(model) or DEFAULT_PI_MODEL
+    levels = ALLOWED_MODELS.get(resolved)
+    if levels is None:
+        raise ValueError(
+            f"model {model!r} is not on the roster; allowed: "
+            + ", ".join(sorted(ALLOWED_MODELS)))
+    level = thinking or DEFAULT_THINKING_FOR[resolved]
+    if level not in levels:
+        raise ValueError(
+            f"model {resolved} runs at {'/'.join(levels)}, not {level!r}")
+    return resolved, level
 
 # Retry escalation: each failed attempt bumps a pi task to the next stronger
 # model. OSS-only by design — a retry must never silently bill Claude tokens.
@@ -49,6 +85,47 @@ ESCALATION = [
     "bedrock-mantle/moonshotai.kimi-k2.5",
     "bedrock-mantle/zai.glm-5",
 ]
+
+# USD per million tokens: (input, output, cache read, 5m cache write).
+# Anthropic list prices read 2026-07-30 from
+# platform.claude.com/docs/en/about-claude/pricing; Sonnet 5 is on the
+# introductory rate that ends 2026-08-31. The OSS gateways are absent on
+# purpose: bedrock-mantle reports usage.cost.total = 0 (it publishes no price
+# metadata) and the opencode models are the free tier, so their real spend is
+# nil. The number worth showing is not what the nodes cost, it is the Claude
+# spend they avoided.
+PRICES = {
+    "claude-opus-5": (5.0, 25.0, 0.50, 6.25),
+    "claude-sonnet-5": (2.0, 10.0, 0.20, 2.50),
+    "claude-haiku-4-5-20251001": (1.0, 5.0, 0.10, 1.25),
+}
+
+# What the planner itself runs on, and therefore what a single-session run of
+# the same work would have been billed at.
+BASELINE_MODEL = "claude-opus-5"
+
+
+def usage_cost(model: str, usage: dict) -> float:
+    """USD for one agent's token usage, or 0.0 on a model with no published price.
+
+    Zero means unpriced, not free-and-certain: guessing a rate for a gateway
+    that publishes none would put a fabricated number on the dashboard.
+    """
+    price = PRICES.get(model)
+    if not price:
+        return 0.0
+    pin, pout, pread, pwrite = price
+    return (
+        (usage.get("input") or 0) * pin
+        + (usage.get("output") or 0) * pout
+        + (usage.get("cacheRead") or 0) * pread
+        + (usage.get("cacheWrite") or 0) * pwrite
+    ) / 1e6
+
+
+def baseline_cost(usage: dict) -> float:
+    """What these tokens would have cost in one planner-model session."""
+    return usage_cost(BASELINE_MODEL, usage)
 
 
 def escalate_payload(task_type: str, payload: str) -> str | None:
@@ -84,6 +161,34 @@ def escalate_payload(task_type: str, payload: str) -> str | None:
 def resolve_model(model: str | None) -> str | None:
     """Map a friendly canonical name to its opencode id; pass full ids through."""
     return MODEL_ALIASES.get(model, model) if model else model
+
+
+# Splice (github: the local checkout) gives a node `read_scope_map` and
+# `splice_edit`: AST-anchored patches behind an LSP delta gate, so an edit that
+# introduces a new diagnostic is rejected instead of committed. That gate is
+# the cheapest quality floor available for a weak model, whose worst failure is
+# a confident whole-file rewrite.
+SPLICE_ENV = "SILICORISM_SPLICE"
+SPLICE_PROBES = ("~/.pi/agent/extensions/splice", "~/Projects/splice")
+
+
+def splice_root() -> str | None:
+    """Directory of the splice checkout, or None if it is not installed.
+
+    Presence is checked by the extension file, not the directory: a stale env
+    var pointing at an empty path must read as "no splice" rather than become
+    a broken `-e` argument that kills every pane at startup.
+    """
+    # An operator who sets the variable meant it: a value that does not hold an
+    # extension turns splice off rather than falling through to a probe, which
+    # is the only way to run a node without it on a machine that has it.
+    override = os.environ.get(SPLICE_ENV)
+    candidates = (override,) if override else SPLICE_PROBES
+    for cand in candidates:
+        root = os.path.expanduser(cand)
+        if os.path.isfile(os.path.join(root, "extensions", "splice.ts")):
+            return root
+    return None
 
 
 # Checked in order; the first one present wins.
@@ -163,11 +268,36 @@ def _spawn(cmd: list[str], cwd, label: str) -> str:
     return proc.stdout.strip()[:500]
 
 
+HANDOFF_MARK = "--- HANDOFF ---"
+TRUNCATED_NOTE = "\n[... earlier output trimmed ...]"
+HANDOFF_CAP = 1500
+
+
+def handoff(artifact: str, *, cap: int = HANDOFF_CAP) -> str:
+    """The part of an artifact worth putting in front of a dependent node.
+
+    Edges used to carry the parent's whole transcript: one live run spent
+    10,072 input tokens on a node whose job was to append a single function,
+    nearly all of it its parent's prose. The block is asked for in
+    DELIVERABLES; the bounded tail is the fallback, because weak models forget
+    formats and a truncated conclusion still beats eight thousand tokens of
+    working notes. The tail, not the head — that is where a run's verdict is.
+    """
+    if not artifact:
+        return ""
+    head, mark, block = artifact.rpartition(HANDOFF_MARK)
+    if mark:
+        return block.strip()
+    if len(artifact) <= cap:
+        return artifact
+    return TRUNCATED_NOTE + artifact[-cap:]
+
+
 def _with_context(prompt: str, context) -> str:
-    """Append completed-dependency artifacts to a prompt (artifact hand-off)."""
+    """Append completed-dependency hand-offs to a prompt (artifact hand-off)."""
     if not context:
         return prompt
-    parts = [str(v) for v in context.values() if v]
+    parts = [h for h in (handoff(str(v)) for v in context.values() if v) if h]
     if not parts:
         return prompt
     return prompt + "\n\n--- Context from prior tasks ---\n" + "\n".join(parts)
@@ -176,9 +306,25 @@ def _with_context(prompt: str, context) -> str:
 def _prompt(data: dict, context, *, native=False) -> str:
     """Build the agent prompt: base + dep artifacts + requested skills + P2P."""
     p = _with_context(data["prompt"], context)
-    injected = skills.load_skills(data.get("skills"), cwd=data.get("cwd"))
+    # Discipline is the floor, not an opt-in. A node only got coding-excellence
+    # when the plan remembered to name it, so the built-in tiers — the path
+    # taken whenever nobody hand-wrote a DAG — ran with none at all. Pass
+    # "skills": [] to mean none; omitting the key means the default.
+    requested = data["skills"] if "skills" in data else list(DEFAULT_SKILLS)
+    injected = skills.load_skills(requested, cwd=data.get("cwd"))
     if injected:
         p += "\n\n" + injected
+    # The lease, stated to the node that holds it. build_dag has already proved
+    # no unordered sibling claims these, so "yours alone" is a fact here.
+    if data.get("writes"):
+        p += ("\n\n--- Files you own ---\n"
+              + ", ".join(data["writes"])
+              + "\nNo other node running now will touch them. Do not edit files "
+                "outside this list without saying so in your handoff.")
+    # Pushed, not polled: mail waiting at launch is put in front of the agent,
+    # because nothing ever stopped mid-run to go and look for it.
+    if data.get("inbox"):
+        p += "\n\n--- Messages waiting for you ---\n" + "\n".join(data["inbox"])
     if data.get("p2p"):
         p += P2P_NOTE
         if native:
@@ -212,6 +358,10 @@ def native_command(task_type: str, payload: str, context=None,
         # the agent settles and writes the clean artifact to $SILICORISM_ARTIFACT.
         if data.get("artifact"):
             prelude += f"export SILICORISM_ARTIFACT={shlex.quote(data['artifact'])}; "
+        # Only pi can report its own tokens. The extension writes them here on
+        # settle; no path means no telemetry rather than a broken run.
+        if data.get("usage"):
+            prelude += f"export SILICORISM_USAGE={shlex.quote(data['usage'])}; "
         # An execution node runs on exactly what the plan gave it. Left to
         # discover, pi loads the operator's global CLAUDE.md, their skills,
         # their prompt templates and every installed extension: measured on one
@@ -230,11 +380,33 @@ def native_command(task_type: str, payload: str, context=None,
         project = project_context(data.get("cwd"))
         if project:
             parts += ["--append-system-prompt", project]
+        # Registering tools is not enough: a weak model ignores a tool it was
+        # never told to prefer, so splice's own operating manual goes in with
+        # it. Preferred, not enforced — pi's write/edit stay available, so a
+        # node blocked by a splice rejection can still finish.
+        splice = splice_root()
+        if splice:
+            parts += ["-e", os.path.join(splice, "extensions", "splice.ts")]
+            overlay = os.path.join(splice, "system-prompt-overlay.md")
+            if os.path.isfile(overlay):
+                parts += ["--append-system-prompt", overlay]
         if data.get("thinking"):
             parts += ["--thinking", data["thinking"]]
         parts.append(prompt)
     else:  # claude
-        parts = ["claude", "-p"]
+        # Same contract as the pi branch, in this CLI's flags: the node runs on
+        # the plan, not on the operator's install. --setting-sources project
+        # keeps the repo's own .claude/settings.json and drops the user's
+        # global settings, skills and hooks; --strict-mcp-config with no
+        # --mcp-config leaves the node zero MCP servers, which is what stops it
+        # reaching silicorism_plan_and_submit and queueing its own DAG (the
+        # -ne case); --no-session-persistence keeps one-shot nodes out of the
+        # resume history. File access is already bounded — tmux opens the pane
+        # in the worktree and --add-dir is the only way to widen that, so it is
+        # deliberately absent. Residual gap: no flag suppresses the user-level
+        # CLAUDE.md, so this is narrower than pi's isolation, not equal to it.
+        parts = ["claude", "-p", "--setting-sources", "project",
+                 "--strict-mcp-config", "--no-session-persistence"]
         if data.get("model"):
             parts += ["--model", data["model"]]
         parts.append(prompt)
@@ -282,15 +454,34 @@ def _wt_state(db_path, path, state, *, branch=None) -> None:
         pass
 
 
+def _default_base(repo: str | None) -> str:
+    """The repo's own current branch, or "main" when git will not say.
+
+    Defaulting to "main" is a guess about someone else's repository. Every DAG
+    submitted against a repo on `master` used to fail at node one with
+    `invalid reference: main`, which reads as an orchestrator bug.
+    """
+    proc = _git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=repo)
+    branch = proc.stdout.strip() if proc.returncode == 0 else ""
+    return branch if branch and branch != "HEAD" else "main"
+
+
 def worktree_create(payload: str, context=None) -> str:
-    """git worktree add -b <branch> <root>/<branch> <base>. Returns the path."""
+    """git worktree add -b <branch> <root>/<branch> <base>. Returns the path.
+
+    `repo` says which repository to add the worktree to. Without it git ran in
+    whatever directory the worker was started from — for a worker launched from
+    a home directory that is `fatal: not a git repository`, and the failed node
+    then blocks every dependent forever.
+    """
     data = _parse(payload, required=("branch",))
     branch = data["branch"]
-    base = data.get("base") or "main"
+    repo = data.get("repo")
+    base = data.get("base") or _default_base(repo)
     path = os.path.join(WORKTREE_ROOT, branch)
     os.makedirs(WORKTREE_ROOT, exist_ok=True)
     _wt_state(data.get("db"), path, "allocated", branch=branch)
-    proc = _git(["worktree", "add", "-b", branch, path, base])
+    proc = _git(["worktree", "add", "-b", branch, path, base], cwd=repo)
     if proc.returncode != 0:
         _wt_state(data.get("db"), path, "quarantined", branch=branch)
         raise RuntimeError(f"worktree add: {proc.stderr.strip()[:500]}")
@@ -308,14 +499,15 @@ def worktree_cleanup(payload: str, context=None) -> str:
     """
     data = _parse(payload, required=("worktree_path",))
     path, branch = data["worktree_path"], data.get("branch")
+    repo = data.get("repo")
     _git(["add", "-A"], cwd=path)
     _git(["commit", "-m", f"silicorism: {branch or 'work'}"], cwd=path)  # noop if clean
-    rm = _git(["worktree", "remove", "--force", path])
+    rm = _git(["worktree", "remove", "--force", path], cwd=repo)
     if rm.returncode != 0:
         raise RuntimeError(f"worktree remove: {rm.stderr.strip()[:500]}")
     kept = ""
     if branch:
-        if _git(["branch", "-d", branch]).returncode != 0:
+        if _git(["branch", "-d", branch], cwd=repo).returncode != 0:
             kept = f"; kept branch {branch} (unmerged)"
     _wt_state(data.get("db"), path, "cleaned", branch=branch)
     return f"removed {path}{kept}"
@@ -329,16 +521,17 @@ def worktree_merge(payload: str, context=None) -> str:
     """
     data = _parse(payload, required=("worktree_path", "branch"))
     path, branch = data["worktree_path"], data["branch"]
-    base = data.get("base") or "main"
+    repo = data.get("repo")
+    base = data.get("base") or _default_base(repo)
     # Agents often leave work uncommitted; commit it so the merge sees it.
     _git(["add", "-A"], cwd=path)
     _git(["commit", "-m", f"silicorism: {branch}"], cwd=path)  # noop if clean
-    sw = _git(["switch", base])
+    sw = _git(["switch", base], cwd=repo)
     if sw.returncode != 0:
         raise RuntimeError(f"switch {base}: {sw.stderr.strip()[:300]}")
-    mg = _git(["merge", "--no-ff", "-m", f"silicorism: merge {branch}", branch])
+    mg = _git(["merge", "--no-ff", "-m", f"silicorism: merge {branch}", branch], cwd=repo)
     if mg.returncode != 0:
-        _git(["merge", "--abort"])
+        _git(["merge", "--abort"], cwd=repo)
         _wt_state(data.get("db"), path, "quarantined", branch=branch)
         raise RuntimeError(f"merge conflict: {mg.stdout.strip()[:300]}")
     return f"merged {branch} into {base}"
@@ -381,16 +574,103 @@ def worktree_integrate(payload: str, context=None) -> str:
 def verify(payload: str, context=None) -> str:
     """Deterministic gate: run the test command; non-zero exit fails the task.
 
-    Agents can claim success — this node cannot. Payload: {test_command, cwd}.
+    Agents can claim success — this node cannot. Payload:
+    {test_command, cwd, expect_fail?}.
+
+    `expect_fail` inverts the gate, which is the only way a DAG can insist on
+    red-green order: put one after the node that writes the tests and before
+    the node that implements, and a test that passes against unwritten code —
+    the classic vacuous assertion — fails the run at the point it was written
+    instead of certifying it four nodes later.
     """
     data = _parse(payload, required=("test_command", "cwd"))
     proc = subprocess.run(data["test_command"], shell=True, capture_output=True,
                           text=True, cwd=data["cwd"], timeout=600)
+    output = (proc.stdout + proc.stderr).strip()[:500]
+    if data.get("expect_fail"):
+        if proc.returncode == 0:
+            raise RuntimeError(
+                f"verify expected failure but the command passed: "
+                f"{data['test_command']}\n"
+                "A new test that passes before the code exists asserts nothing. "
+                f"{output}")
+        return f"verify failed as expected (exit {proc.returncode}): {data['test_command']}"
     if proc.returncode != 0:
         raise RuntimeError(
-            f"verify failed (exit {proc.returncode}): "
-            f"{(proc.stdout + proc.stderr).strip()[:500]}")
+            f"verify failed (exit {proc.returncode}): {output}")
     return f"verify passed: {data['test_command']}"
+
+
+class RequirementsUnmet(RuntimeError):
+    """A node's deliverables are missing, whatever its tests said."""
+
+
+def check_requires(spec: dict, cwd: str) -> list[str]:
+    """Every unmet requirement in `spec`, as operator-readable strings.
+
+    Tests catch code that does not work. They do not catch code that was never
+    written: across the Splice runs every defect that survived a green gate was
+    an absence — a list capped at 3 where the spec said 6, a function imported
+    by the tests and never called, an auto-fix stubbed out as a no-op with its
+    test deleted. A test suite has nothing to say about any of those.
+
+    So the plan states what must exist and this checks it literally, in the
+    worker, with no model in the loop:
+
+        {"files":     ["src/auth.go"],
+         "symbols":   {"src/auth.go": ["func ValidateJWT", "type Claims"]},
+         "absent":    {"src/auth.go": ["TODO", "not implemented"]},
+         "min_lines": {"tests/auth_test.go": 20}}
+
+    Substrings, not parsing: it has to work on Go, Rust, Python, TSX and YAML
+    without a grammar per language, and a plan that names `func ValidateJWT`
+    is already saying the thing precisely enough.
+    """
+    problems: list[str] = []
+
+    def read(rel: str) -> str | None:
+        path = rel if os.path.isabs(rel) else os.path.join(cwd, rel)
+        try:
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                return fh.read()
+        except OSError:
+            return None
+
+    for rel in spec.get("files") or []:
+        body = read(rel)
+        if body is None:
+            problems.append(f"{rel}: required file was not created")
+        elif not body.strip():
+            problems.append(f"{rel}: required file is empty")
+
+    for rel, needles in (spec.get("symbols") or {}).items():
+        body = read(rel)
+        if body is None:
+            problems.append(f"{rel}: required file was not created")
+            continue
+        for needle in needles:
+            if needle not in body:
+                problems.append(f"{rel}: required symbol {needle!r} is missing")
+
+    for rel, needles in (spec.get("absent") or {}).items():
+        body = read(rel)
+        if body is None:
+            continue  # its absence is already reported by files/symbols
+        for needle in needles:
+            if needle in body:
+                problems.append(
+                    f"{rel}: contains {needle!r}, which this node was told not to leave behind")
+
+    for rel, minimum in (spec.get("min_lines") or {}).items():
+        body = read(rel)
+        if body is None:
+            problems.append(f"{rel}: required file was not created")
+            continue
+        actual = len(body.splitlines())
+        if actual < int(minimum):
+            problems.append(f"{rel}: {actual} lines, expected at least {minimum}")
+
+    return problems
 
 
 def _agent_payload(prompt, model, thinking, cwd) -> str:

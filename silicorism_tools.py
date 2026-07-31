@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import time
 from datetime import datetime, timezone
 
@@ -241,6 +242,50 @@ def _toposort(nodes: list[dict]) -> list[str]:
     return order
 
 
+def _ancestors(nodes: list[dict]) -> dict[str, set]:
+    """{node id: every node that must finish before it}, transitively."""
+    direct = {n["id"]: set(n.get("depends_on") or []) for n in nodes}
+    out: dict[str, set] = {}
+
+    def walk(nid: str) -> set:
+        if nid in out:
+            return out[nid]
+        out[nid] = set()          # cycles are rejected elsewhere; this is a guard
+        seen = set(direct[nid])
+        for parent in direct[nid]:
+            seen |= walk(parent)
+        out[nid] = seen
+        return seen
+
+    for n in nodes:
+        walk(n["id"])
+    return out
+
+
+def _check_write_conflicts(nodes: list[dict]) -> None:
+    """Reject a DAG where two nodes that can run at once write the same file.
+
+    Two builders once appended to one calc.py in one worktree simultaneously
+    and both edits survived by luck; nothing in the queue would have noticed a
+    lost one. Ordering is the fix the graph already offers, so this only has to
+    prove the order exists. A node that declares no `writes` is not policed:
+    the claim is a declaration, not a discovery, and old plans must keep
+    working.
+    """
+    claims = [(n["id"], set(n.get("writes") or [])) for n in nodes]
+    claims = [(nid, files) for nid, files in claims if files]
+    if len(claims) < 2:
+        return
+    anc = _ancestors(nodes)
+    for i, (a, fa) in enumerate(claims):
+        for b, fb in claims[i + 1:]:
+            shared = fa & fb
+            if shared and a not in anc[b] and b not in anc[a]:
+                raise ValueError(
+                    f"nodes {a!r} and {b!r} both write {sorted(shared)} and "
+                    "neither runs before the other; add a depends_on edge")
+
+
 # Appended to every pi node prompt. Each line answers something observed: an
 # agent that reported a green suite while its own test failed, one that silently
 # dropped a config value the prompt told it to choose, and one that summarised
@@ -251,15 +296,73 @@ DELIVERABLES = (
     "criteria. No summaries, no paraphrase.\n"
     "2. State every value this prompt asked you to choose, and why you chose it.\n"
     "3. Never report a command as passing without its pasted output. If you did "
-    "not run it, say so."
+    "not run it, say so.\n"
+    # Everything above is for the operator reading the pane. This last line is
+    # for the next node: it is the only part of your output that is put in
+    # front of whoever depends on you, so anything they need has to be here.
+    f"4. End your final message with this block, and nothing after it:\n"
+    f"{handlers.HANDOFF_MARK}\n"
+    "files: <paths you changed, comma separated, or none>\n"
+    "added: <symbols or behaviour you added, or none>\n"
+    "decisions: <choices a later node must not contradict>\n"
+    "open: <what you could not finish, or none>"
 )
+
+
+def _assert_git_repo(path: str) -> None:
+    """Fail the submit, not the first node, when there is no repo to branch from."""
+    proc = subprocess.run(["git", "rev-parse", "--git-dir"], cwd=path,
+                          capture_output=True, text=True, timeout=30)
+    if proc.returncode != 0:
+        raise ValueError(
+            f"cwd {path!r} is not inside a git repository, so a named DAG cannot "
+            "create its worktree. Pass cwd= the repo you mean, or omit name= to "
+            "run the nodes in place.")
+
+
+# The shape check for `requires`, which the worker enforces literally after a
+# node exits. Rejecting a malformed spec at submit matters more here than
+# elsewhere: a requirement that silently does nothing is worse than none, since
+# the plan is written believing it is checked.
+_REQUIRES_LIST_KEYS = ("files",)
+_REQUIRES_MAP_KEYS = ("symbols", "absent", "min_lines")
+
+
+def _check_requires_spec(nid: str, spec) -> None:
+    if not isinstance(spec, dict):
+        raise ValueError(f"node {nid!r}: requires must be an object")
+    unknown = set(spec) - set(_REQUIRES_LIST_KEYS) - set(_REQUIRES_MAP_KEYS)
+    if unknown:
+        raise ValueError(
+            f"node {nid!r}: unknown requires keys {sorted(unknown)}; "
+            f"allowed: {sorted(_REQUIRES_LIST_KEYS + _REQUIRES_MAP_KEYS)}")
+    for key in _REQUIRES_LIST_KEYS:
+        if key in spec and not isinstance(spec[key], list):
+            raise ValueError(f"node {nid!r}: requires.{key} must be a list of paths")
+    for key in _REQUIRES_MAP_KEYS:
+        if key in spec and not isinstance(spec[key], dict):
+            raise ValueError(f"node {nid!r}: requires.{key} must be an object keyed by path")
+    for path, needles in (spec.get("symbols") or {}).items():
+        if not isinstance(needles, list) or not all(isinstance(s, str) for s in needles):
+            raise ValueError(f"node {nid!r}: requires.symbols[{path!r}] must be a list of strings")
+    for path, needles in (spec.get("absent") or {}).items():
+        if not isinstance(needles, list) or not all(isinstance(s, str) for s in needles):
+            raise ValueError(f"node {nid!r}: requires.absent[{path!r}] must be a list of strings")
+    for path, minimum in (spec.get("min_lines") or {}).items():
+        if not isinstance(minimum, int):
+            raise ValueError(f"node {nid!r}: requires.min_lines[{path!r}] must be an integer")
 
 
 def build_dag(conn, db_path, nodes, *, name=None, base="main", cwd=None) -> dict:
     """Submit an arbitrary agent DAG. Each node is a dict:
 
         {id, prompt, depends_on?, harness?("pi"|"verify"), model?, thinking?,
-         skills?, p2p?}
+         skills?, p2p?, writes?}
+
+    `writes` is the files a node claims. Two nodes claiming the same file with
+    no dependency edge between them are rejected: they would run at once, in
+    one worktree, and a lost update would be silent. `model`/`thinking` are
+    checked against handlers.ALLOWED_MODELS here rather than in the pane.
 
     A node with harness "verify" is a test gate instead of an agent: it takes
     `test_command` in place of `prompt` and fails the DAG when the tests do.
@@ -279,16 +382,24 @@ def build_dag(conn, db_path, nodes, *, name=None, base="main", cwd=None) -> dict
             if dep not in idset:
                 raise ValueError(f"node {n['id']!r} depends on unknown node {dep!r}")
     order = _toposort(nodes)  # also raises on cycles
+    _check_write_conflicts(nodes)
     node_by_id = {n["id"]: n for n in nodes}
 
     # Absolute so tmux `-c <work_path>` opens panes in the target repo regardless
     # of where the workers were spawned from; a literal "." is CWD-dependent.
-    work_path = cwd or os.getcwd()
+    repo = os.path.abspath(cwd or os.getcwd())
+    work_path = repo
     wt_task = None
     if name:
+        # A named DAG means a git worktree, and a worktree needs a repository to
+        # come from. Checked here because the alternative is a worktree_create
+        # node that fails deep in the queue and blocks every dependent forever,
+        # with `silicorism_gc` unable to clear the pending rows behind it.
+        _assert_git_repo(repo)
         work_path = os.path.join(WORKTREE_ROOT, name)
         wt_task = db.add_task(conn, "worktree_create",
-                              json.dumps({"branch": name, "base": base, "db": db_path}),
+                              json.dumps({"branch": name, "base": base, "db": db_path,
+                                          "repo": repo}),
                               worktree_path=work_path)
 
     id_map: dict[str, int] = {}
@@ -312,15 +423,26 @@ def build_dag(conn, db_path, nodes, *, name=None, base="main", cwd=None) -> dict
             if not n.get("test_command"):
                 raise ValueError(f"node {nid!r}: verify needs a test_command")
             payload = {"test_command": n["test_command"], "cwd": work_path}
+            if n.get("expect_fail"):
+                payload["expect_fail"] = True
         else:
             if not n.get("prompt"):
                 raise ValueError(f"node {nid!r}: {harness} node needs a prompt")
+            # Off-roster models used to reach a pane and die there, which reads
+            # as an orchestrator bug rather than a bad plan. Reject on submit.
+            model, thinking = handlers.check_model(n.get("model"),
+                                                   n.get("thinking"))
             payload = {"prompt": n["prompt"] + DELIVERABLES, "cwd": work_path,
-                       "p2p": n.get("p2p", True), "agent_id": nid, "db": db_path}
+                       "p2p": n.get("p2p", True), "agent_id": nid, "db": db_path,
+                       "model": model, "thinking": thinking}
             # test_command turns this node into its own gate: the worker runs
             # it after the agent exits (worker._gate_command), so the node
             # cannot report a pass its tests do not support.
-            for key in ("model", "thinking", "skills", "test_command",
+            # model/thinking are already set above, resolved and checked; a
+            # raw copy here would put the unresolved alias back.
+            if n.get("requires"):
+                _check_requires_spec(nid, n["requires"])
+            for key in ("skills", "test_command", "writes", "requires",
                         "timeout_s", "stall_timeout_s"):
                 if n.get(key):
                     payload[key] = n[key]
@@ -333,7 +455,8 @@ def build_dag(conn, db_path, nodes, *, name=None, base="main", cwd=None) -> dict
         leaves = [id_map[nid] for nid in ids if nid not in depended]
         result["cleanup"] = db.add_task(
             conn, "worktree_cleanup",
-            json.dumps({"worktree_path": work_path, "branch": name, "db": db_path}),
+            json.dumps({"worktree_path": work_path, "branch": name, "db": db_path,
+                        "repo": repo}),
             depends_on=leaves, worktree_path=work_path)
         result["worktree"] = wt_task
         result["worktree_path"] = work_path
@@ -556,6 +679,8 @@ def get_status(conn) -> dict:
         # A busy agent that has written nothing for minutes: the one reading
         # that separates a working run from a wedged one.
         "stalled": _stalled(conn),
+        # Tokens burnt, USD spent, and the planner-rate spend the run avoided.
+        "usage": db.usage_totals(conn),
         "agents": [dict(h) for h in db.heartbeats(conn)],
         # Trimmed hard: every row here is orchestrator context the user pays
         # for, and a successful task's artifact tells the planner nothing.

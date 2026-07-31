@@ -69,10 +69,42 @@ def test_claude_md_is_used_when_there_is_no_agents_md(tmp_path):
 def test_no_context_file_means_no_empty_flag(tmp_path):
     """pi treats --append-system-prompt as literal text when the path is not a
     file, so a missing file must not become the string 'AGENTS.md'."""
-    parts = _cmd({"prompt": "x", "cwd": str(tmp_path)})
-    assert "--append-system-prompt" not in parts
+    # Checked by value, not by flag: splice's overlay uses the same flag, so
+    # its absence is no longer the signal.
+    def _appended(payload):
+        parts = _cmd(payload)
+        return [parts[i + 1] for i, p in enumerate(parts)
+                if p == "--append-system-prompt"]
+
+    assert not any(a.endswith(("AGENTS.md", "CLAUDE.md"))
+                   for a in _appended({"prompt": "x", "cwd": str(tmp_path)}))
     # and an unset cwd must not reach into whatever directory the worker is in
-    assert "--append-system-prompt" not in _cmd({"prompt": "x"})
+    assert not any(a.endswith(("AGENTS.md", "CLAUDE.md"))
+                   for a in _appended({"prompt": "x"}))
+
+
+def test_a_claude_node_does_not_inherit_the_operators_setup():
+    """The pi branch had this and the claude branch did not, so the same DAG
+    was isolated or not depending on which harness a node was given."""
+    built = handlers.native_command("claude", json.dumps({"prompt": "x"}))
+    assert built is not None
+    parts = shlex.split(built)
+    assert parts[parts.index("--setting-sources") + 1] == "project"
+    assert "--strict-mcp-config" in parts
+    assert "--no-session-persistence" in parts
+    # --add-dir would widen access past the worktree the pane opened in
+    assert "--add-dir" not in parts
+
+
+def test_a_claude_node_still_gets_its_prompt_and_model_last():
+    built = handlers.native_command("claude", json.dumps(
+        {"prompt": "build it", "model": "claude-opus-5"}))
+    assert built is not None
+    parts = shlex.split(built)
+    # Last argument, and it opens with the prompt: the default skill text is
+    # appended to it, so an equality check would only be asserting the default.
+    assert parts[-1].startswith("build it")
+    assert parts[parts.index("--model") + 1] == "claude-opus-5"
 
 
 def test_the_worker_tells_the_command_where_the_task_runs(tmp_path):

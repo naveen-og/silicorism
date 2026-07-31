@@ -70,9 +70,9 @@ def test_tools_call_dynamic_dag(tmp_path):
     dbp = str(tmp_path / "dag.db")
     nodes = [
         {"id": "a", "prompt": "recon", "harness": "pi",
-         "model": "opencode/deepseek-v4-flash-free", "thinking": "high"},
+         "model": "opencode/deepseek-v4-flash-free", "thinking": "max"},
         {"id": "b", "prompt": "build", "depends_on": ["a"], "harness": "pi",
-         "model": "opencode/nemotron-3-ultra-free", "thinking": "high"},
+         "model": "bedrock-mantle/zai.glm-5", "thinking": "high"},
         {"id": "c", "prompt": "review", "depends_on": ["b"], "harness": "claude"},
     ]
     r = mcp.handle({"jsonrpc": "2.0", "id": 5, "method": "tools/call",

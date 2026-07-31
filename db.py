@@ -43,6 +43,10 @@ CREATE TABLE IF NOT EXISTS tasks (
     pane_target     TEXT,            -- tmux "<window>.<pane_id>" showing this task
     started_at      TEXT,            -- stamped when a worker claims the task
     last_progress_at TEXT,           -- stamped when the task's files last changed
+    input_tokens    INTEGER,         -- summed over every attempt, not just the last
+    output_tokens   INTEGER,
+    cost_usd        REAL,            -- real spend; 0.0 on an unpriced gateway
+    model_used      TEXT,            -- provider/model the last attempt actually ran on
     created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
     updated_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );
@@ -121,6 +125,10 @@ _MIGRATIONS = (
     ("pane_target", "TEXT"),
     ("started_at", "TEXT"),
     ("last_progress_at", "TEXT"),
+    ("input_tokens", "INTEGER"),
+    ("output_tokens", "INTEGER"),
+    ("cost_usd", "REAL"),
+    ("model_used", "TEXT"),
 )
 
 
@@ -267,6 +275,43 @@ def complete_task(conn, task_id, artifact: str | None = None) -> None:
             "updated_at=? WHERE id=?",
             (artifact, now(), task_id),
         )
+
+
+def record_usage(conn, task_id, *, input_tokens: int, output_tokens: int,
+                 cost_usd: float, model_used: str) -> None:
+    """Add one attempt's token spend to a task's running total.
+
+    Additive on purpose. The retry ladder runs a failed node again on a stronger
+    model, and both attempts were paid for — overwriting would report the bill
+    of whichever attempt happened to be last. model_used is overwritten instead,
+    because the question it answers is which model produced the artifact.
+    """
+    with immediate(conn) as c:
+        c.execute(
+            "UPDATE tasks SET input_tokens=COALESCE(input_tokens,0)+?, "
+            "output_tokens=COALESCE(output_tokens,0)+?, "
+            "cost_usd=COALESCE(cost_usd,0)+?, model_used=? WHERE id=?",
+            (int(input_tokens), int(output_tokens), float(cost_usd),
+             model_used, task_id),
+        )
+
+
+def usage_totals(conn) -> dict:
+    """Whole-DAG token and cost totals, plus the spend the run avoided.
+
+    baseline_usd prices every token the cheap nodes consumed at the planner's
+    own rate: the closest honest answer to "what would one Claude session have
+    cost", and the only number that says whether the architecture pays off.
+    """
+    import handlers  # local: db is imported by handlers' callers, not by handlers
+    row = conn.execute(
+        "SELECT COALESCE(SUM(input_tokens),0) AS i, "
+        "COALESCE(SUM(output_tokens),0) AS o, "
+        "COALESCE(SUM(cost_usd),0.0) AS c FROM tasks").fetchone()
+    usage = {"input": row["i"], "output": row["o"]}
+    return {"input_tokens": row["i"], "output_tokens": row["o"],
+            "cost_usd": float(row["c"]),
+            "baseline_usd": handlers.baseline_cost(usage)}
 
 
 def touch_progress(conn, task_id) -> None:

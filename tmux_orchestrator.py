@@ -370,7 +370,7 @@ if __name__ == "__main__":
     sent = sentinel_path("9")
     with patch("subprocess.run", side_effect=fake):
         ensure_session()
-        task_window(7, "/tmp/worktrees/x", "pi --model hy3 'go'")
+        task_window(7, "/tmp/worktrees/x", "pi --model ling-3.0-flash 'go'")
         mark_done(7)
         run_task_in_pane(9, "pi", "/tmp/worktrees/y", "pi -p 'go'", sent)
     flat = [" ".join(c) for c in calls]

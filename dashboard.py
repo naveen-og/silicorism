@@ -261,6 +261,35 @@ def progress_bar(counts, width: int, g: dict) -> list:
     return spans
 
 
+def _tokens(n: int) -> str:
+    return f"{n / 1000:.1f}k" if n >= 1000 else str(n)
+
+
+def _usage_spans(tasks) -> list:
+    """Tokens burnt, what they cost, and what a single-session run would have.
+
+    `saved` is the whole point of the tool: the nodes ran on gateways that bill
+    nothing, so the honest headline is the planner-rate spend avoided, not the
+    near-zero spend incurred. Empty until a node reports usage, so a run with
+    no telemetry shows nothing rather than a confident $0.00.
+    """
+    inp = out = 0
+    cost = 0.0
+    for row in tasks:
+        try:
+            inp += row["input_tokens"] or 0
+            out += row["output_tokens"] or 0
+            cost += row["cost_usd"] or 0.0
+        except (KeyError, IndexError):   # a pre-telemetry row
+            continue
+    if not (inp or out):
+        return []
+    saved = handlers.baseline_cost({"input": inp, "output": out}) - cost
+    return [(f" {_tokens(inp)} in / {_tokens(out)} out", "dim"),
+            (f"   spent ${cost:.2f}", "dim"),
+            (f"   saved ${saved:.2f}", "done")]
+
+
 def _header(counts, tasks, *, width, now, label, g) -> list[Line]:
     title = [(" silicorism", "accent")]
     if label:
@@ -277,8 +306,12 @@ def _header(counts, tasks, *, width, now, label, g) -> list[Line]:
         if counts.get(name):
             tally.append((f"   {counts[name]} {key}", key))
     bar_w = max(min(width - span_width(tally) - 4, 40), 8)
-    return [Line("header", _row(title, clock, width)),
-            Line("header", [(" ", "")] + progress_bar(counts, bar_w, g) + tally)]
+    lines = [Line("header", _row(title, clock, width)),
+             Line("header", [(" ", "")] + progress_bar(counts, bar_w, g) + tally)]
+    usage = _usage_spans(tasks)
+    if usage:
+        lines.append(Line("usage", usage))
+    return lines
 
 
 def _section(name: str, width: int, g: dict) -> Line:
