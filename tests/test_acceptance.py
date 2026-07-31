@@ -285,3 +285,79 @@ def test_an_explicit_base_is_still_honoured(tmp_path):
     row = conn.execute(
         "SELECT payload FROM tasks WHERE task_type = 'worktree_create'").fetchone()
     assert json.loads(row["payload"])["base"] == "release"
+
+
+# ── writes is a fence, not a note ────────────────────────────────────────────
+
+def _agent_task(tmp_path, **payload):
+    payload.setdefault("cwd", str(tmp_path))
+    return _task(payload)
+
+
+def test_a_node_that_rewrites_the_tests_it_is_measured_by_fails(tmp_path):
+    """The live run's actual cheat: the implementer edited ratelimit_test.go,
+    which it had not claimed, while trying to make a red suite go green."""
+    tests = tmp_path / "ratelimit_test.go"
+    tests.write_text("package r\n\nfunc TestAllow(t *testing.T) { t.Fatal(\"red\") }\n")
+    task = _agent_task(tmp_path, writes=["ratelimit.go"])
+    before = worker._unclaimed_snapshot(task)
+
+    (tmp_path / "ratelimit.go").write_text("package r\n")     # claimed: fine
+    tests.write_text("package r\n\nfunc TestAllow(t *testing.T) {}\n")  # not claimed
+
+    with pytest.raises(handlers.RequirementsUnmet) as err:
+        worker._apply_gate(task, "done", before)
+    assert "ratelimit_test.go" in str(err.value)
+    assert "did not claim" in str(err.value)
+
+
+def test_deleting_an_unclaimed_file_fails_too(tmp_path):
+    (tmp_path / "conf.yaml").write_text("a: 1\n")
+    task = _agent_task(tmp_path, writes=["main.go"])
+    before = worker._unclaimed_snapshot(task)
+    os.remove(tmp_path / "conf.yaml")
+    with pytest.raises(handlers.RequirementsUnmet) as err:
+        worker._apply_gate(task, "done", before)
+    assert "deleted" in str(err.value)
+
+
+def test_editing_a_claimed_file_is_the_whole_point(tmp_path):
+    src = tmp_path / "main.go"
+    src.write_text("package main\n")
+    task = _agent_task(tmp_path, writes=["main.go"])
+    before = worker._unclaimed_snapshot(task)
+    src.write_text("package main\n\nfunc main() {}\n")
+    assert worker._apply_gate(task, "done", before) == "done"
+
+
+def test_a_new_unclaimed_file_is_allowed_but_reported(tmp_path):
+    """go.sum, a lockfile, a CONTEXT.md — allowed, but the operator hears."""
+    task = _agent_task(tmp_path, writes=["main.go"])
+    before = worker._unclaimed_snapshot(task)
+    (tmp_path / "go.sum").write_text("h1:abc\n")
+    out = worker._apply_gate(task, "done", before)
+    assert "unclaimed files created: go.sum" in out
+
+
+def test_a_node_with_no_writes_claim_is_not_fenced(tmp_path):
+    """The claim is opt-in; a node that claimed nothing is policed by nothing."""
+    (tmp_path / "a.txt").write_text("one\n")
+    task = _agent_task(tmp_path)
+    assert worker._unclaimed_snapshot(task) is None
+    (tmp_path / "a.txt").write_text("two\n")
+    assert worker._apply_gate(task, "done", None) == "done"
+
+
+def test_the_snapshot_skips_directories_not_worth_walking(tmp_path):
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".git" / "index").write_text("x")
+    (tmp_path / "node_modules").mkdir()
+    (tmp_path / "node_modules" / "big.js").write_text("x")
+    (tmp_path / "keep.py").write_text("x")
+    snap = worker._unclaimed_snapshot(_agent_task(tmp_path, writes=["main.go"]))
+    assert set(snap) == {"keep.py"}
+
+
+def test_the_prompt_warns_before_the_worker_punishes(tmp_path):
+    assert "did not claim" in st.DELIVERABLES
+    assert "output-token limit" in st.DELIVERABLES

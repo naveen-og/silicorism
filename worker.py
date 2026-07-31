@@ -152,7 +152,87 @@ def _requires_spec(task) -> dict:
     return spec if isinstance(spec, dict) else {}
 
 
-def _apply_gate(task, artifact: str) -> str:
+# Never worth walking to find out what a node touched.
+_SNAPSHOT_SKIP_DIRS = frozenset({
+    ".git", "node_modules", "target", "dist", "build", "out", "vendor",
+    ".venv", "venv", "__pycache__", ".pytest_cache", ".mypy_cache",
+})
+# Upper bound on files tracked, so the fence cannot stall on a huge tree.
+_SNAPSHOT_MAX_FILES = 20000
+
+
+def _claimed_files(task) -> list[str] | None:
+    if task["task_type"] not in handlers.NATIVE_AGENTS:
+        return None
+    try:
+        data = json.loads(task["payload"] or "{}")
+    except (json.JSONDecodeError, ValueError):
+        return None
+    claims = data.get("writes") if isinstance(data, dict) else None
+    return claims if isinstance(claims, list) and claims else None
+
+
+def _unclaimed_snapshot(task) -> dict[str, tuple[int, int]] | None:
+    """(mtime_ns, size) of every existing file this node did NOT claim.
+
+    `writes` was a declaration and nothing more: build_dag used it to reject two
+    unordered nodes claiming one file, and after that no one looked. A builder
+    could rewrite the tests it was measured by — the oldest way to turn a red
+    suite green — and every gate downstream would agree the run had succeeded.
+
+    ponytail: mtime+size, not content hashes. An edit that preserves both is
+    possible in principle; an agent writing through its file tools does not do
+    it, and hashing a large tree twice per node is a real cost for a case that
+    has never happened.
+    """
+    claims = _claimed_files(task)
+    if claims is None:
+        return None
+    cwd = _task_cwd(task)
+    if not cwd or not os.path.isdir(cwd):
+        return None
+    claimed = {os.path.normpath(c) for c in claims}
+    seen: dict[str, tuple[int, int]] = {}
+    for root, dirs, files in os.walk(cwd):
+        dirs[:] = [d for d in dirs if d not in _SNAPSHOT_SKIP_DIRS]
+        for name in files:
+            path = os.path.join(root, name)
+            rel = os.path.normpath(os.path.relpath(path, cwd))
+            if rel in claimed:
+                continue
+            try:
+                st = os.stat(path)
+            except OSError:
+                continue
+            seen[rel] = (st.st_mtime_ns, st.st_size)
+            if len(seen) >= _SNAPSHOT_MAX_FILES:
+                return seen
+    return seen
+
+
+def _assert_unclaimed_untouched(task, before: dict | None) -> str:
+    """Fail the node if it changed a file it did not claim. Returns a note."""
+    if before is None:
+        return ""
+    after = _unclaimed_snapshot(task)
+    if after is None:
+        return ""
+    touched = sorted(rel for rel, stamp in after.items()
+                     if rel in before and before[rel] != stamp)
+    removed = sorted(rel for rel in before if rel not in after)
+    if touched or removed:
+        detail = ", ".join(touched + [f"{r} (deleted)" for r in removed][:20])
+        raise handlers.RequirementsUnmet(
+            "node modified files it did not claim in `writes`: " + detail)
+    # New files are allowed — go.sum, a lockfile, a CONTEXT.md — but they are
+    # reported, because "what else appeared" is the operator's business.
+    created = sorted(rel for rel in after if rel not in before)
+    if created:
+        return "\n\nunclaimed files created: " + ", ".join(created[:20])
+    return ""
+
+
+def _apply_gate(task, artifact: str, unclaimed_before: dict | None = None) -> str:
     """Append the node's gate verdict to its artifact; raise if the gate fails.
 
     Both execution paths go through here. The gate used to live only in the
@@ -174,6 +254,7 @@ def _apply_gate(task, artifact: str) -> str:
             "declared deliverables missing:\n- " + "\n- ".join(unmet))
     if unmet == [] and _requires_spec(task):
         artifact += "\n\nrequires: all declared deliverables present"
+    artifact += _assert_unclaimed_untouched(task, unclaimed_before)
 
     gate = _gate_command(task)
     if not gate:
@@ -371,7 +452,7 @@ def _record_usage(conn, tid) -> None:
         pass
 
 
-def _run_native(conn, task, agent_id, command: str) -> None:
+def _run_native(conn, task, agent_id, command: str, unclaimed_before=None) -> None:
     """Execute an agent live in a tmux pane; raise on non-zero/absent exit."""
     tid = task["id"]
     sentinel = tmux.sentinel_path(tid)
@@ -408,7 +489,7 @@ def _run_native(conn, task, agent_id, command: str) -> None:
                     or f"native pane {win} exit 0")
         # Raises on non-zero, so the except below fails the task: this is the
         # only thing between a claimed pass and a real one.
-        artifact = _apply_gate(task, artifact)
+        artifact = _apply_gate(task, artifact, unclaimed_before)
         db.complete_task(conn, tid, artifact=artifact)
         db.log(conn, tid, agent_id, f"completed (native): {win}")
     except Exception as err:
@@ -495,12 +576,14 @@ def run_worker(db_path: str, agent_id: str, *, idle_sleep: float = 0.1,
                 if _NATIVE else None)
             if native_cmd is None:
                 _open_task_window(db_path, task)
+            # Taken before the agent runs: the fence compares against it after.
+            unclaimed_before = _unclaimed_snapshot(task)
             try:
                 if native_cmd is not None:
-                    _run_native(conn, task, agent_id, native_cmd)
+                    _run_native(conn, task, agent_id, native_cmd, unclaimed_before)
                 else:
                     result = handlers.run(task["task_type"], task["payload"], context)
-                    result = _apply_gate(task, result)
+                    result = _apply_gate(task, result, unclaimed_before)
                     db.complete_task(conn, tid, artifact=result)
                     db.log(conn, tid, agent_id, f"completed: {result[:120]}")
                     _close_task_window(tid, failed=False)

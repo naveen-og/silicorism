@@ -73,11 +73,26 @@ For anything with testable behaviour:
 
 1. a `pi` node that writes the failing test and nothing else (`writes` says so),
 2. a `verify` node with `expect_fail: true` on that test command,
-3. a `pi` node that implements it,
-4. a normal `verify` node.
+3. a **review** node on `glm-5` that reads the tests against the spec and reports
+   contradictions — it writes nothing (`writes: []`) and its finding goes to the
+   implementer through the handoff,
+4. a `pi` node that implements it,
+5. a normal `verify` node.
 
 Step 2 is what makes step 1 real. A test that passes before the code exists asserts
 nothing, and without this gate the pipeline cannot tell the difference.
+
+Step 3 exists because `expect_fail` proves the tests are red, not that they are
+right. In a live run the test node asserted that a bucket refilling at 1 token/sec
+still had nothing available one second later — a claim its own spec contradicts —
+and the implementer then burned 36 minutes and two retries trying to satisfy it.
+One cheap read against the spec catches that before anyone implements to it.
+
+**Fix the API in the plan, not in the nodes.** That same run went wrong because the
+plan said "the clock must be injectable" without giving the signature, so the test
+node invented one, left a placeholder helper, and the implementer had to guess.
+Anything two nodes both touch — a constructor signature, an interface, a file
+layout — belongs in the prompt of both, spelled out.
 
 ## Choosing model and thinking
 

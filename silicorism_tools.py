@@ -297,10 +297,22 @@ DELIVERABLES = (
     "2. State every value this prompt asked you to choose, and why you chose it.\n"
     "3. Never report a command as passing without its pasted output. If you did "
     "not run it, say so.\n"
+    # Observed live: a builder printed a whole Go file into its reply, hit the
+    # model's output-token ceiling mid-function, and the run died with nothing
+    # written to disk. Command output is quoted; source is not.
+    "4. Write files with your file tools. Never paste a whole file's contents "
+    "into your reply — a long paste hits the output-token limit and the run is "
+    "truncated with the file unwritten. Quote at most the lines under discussion.\n"
+    # Also live: an implementer edited the test file it was measured by. The
+    # worker now fails a node that changes a file outside its `writes`, so this
+    # line is the warning rather than the punishment.
+    "5. Do not edit files outside the ones you were given. If a file you do not "
+    "own is wrong, say so in your handoff and work to it as it stands — the "
+    "worker fails this node if it changed a file it did not claim.\n"
     # Everything above is for the operator reading the pane. This last line is
     # for the next node: it is the only part of your output that is put in
     # front of whoever depends on you, so anything they need has to be here.
-    f"4. End your final message with this block, and nothing after it:\n"
+    f"6. End your final message with this block, and nothing after it:\n"
     f"{handlers.HANDOFF_MARK}\n"
     "files: <paths you changed, comma separated, or none>\n"
     "added: <symbols or behaviour you added, or none>\n"
